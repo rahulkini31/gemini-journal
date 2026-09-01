@@ -36,8 +36,13 @@ Three secondary commitments, each targeting a gap the competitive teardown found
 ## Pipeline
 
 ```
- /v2/clock ── closed? ──> log, sleep
+ /v2/clock ── closed? ──> log, sleep until next open
      │ open
+     ▼
+ EXIT LADDER                       [deterministic - no model]
+   profit target +50% | stop loss -60% | time stop 3 DTE
+   runs BEFORE entries: closing always reduces exposure
+     │
      ▼
  MARKET SNAPSHOT  (batch; SQLite; agents never call the API directly)
    underlying bars/quotes (IEX)   option chain (expiration_date_gte, strike-bounded)
@@ -191,6 +196,23 @@ src/bookbound/
 tests/            unit tests for the deterministic layers
 scripts/          verification utilities
 ```
+
+## The live loop
+
+`bookbound.runner` cycles every 5 minutes during session hours and sleeps until
+the next open otherwise. Three details matter more than they look:
+
+- **Sleep is interruptible.** Since PEP 475 `time.sleep()` resumes after a signal
+  handler returns, so a naive 30-second chunk makes Ctrl-C take 30 seconds. The
+  loop sleeps in 1-second ticks and checks a stop flag, bounding shutdown at ~1s.
+- **Output is unbuffered.** The process runs for days under `nohup`; a buffered
+  stream that flushes at exit is useless to an operator tailing the log.
+- **Unexpected exceptions do not kill the loop.** They are logged and counted; the
+  runner halts only after 5 consecutive errors. A loop that dies overnight is a
+  worse failure than one that logs and retries.
+
+It flattens the book 30 minutes before the 4 Sep 15:00 UTC deadline, so the
+judged account is not left holding open structures through the cutoff.
 
 ## What is deliberately NOT here
 

@@ -41,7 +41,8 @@ def chat_json(
             # Both are worth one retry. A genuinely gated model (403 "gated")
             # will not recover, so do not spin on it.
             text = str(exc)
-            if attempt < 2 and ("503" in text or "1010" in text or "capacity" in text):
+            if attempt < 2 and ("503" in text or "1010" in text or "capacity" in text
+                                or "empty response" in text):
                 import time as _time
                 _time.sleep(2.0 * (attempt + 1))
                 last_error = exc

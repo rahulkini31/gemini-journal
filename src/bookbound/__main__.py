@@ -2,8 +2,11 @@
 
     python -m bookbound status      account, book greeks, position health
     python -m bookbound scan        build and gate candidates, no model, no orders
-    python -m bookbound cycle       full cycle, DRY RUN by default
+    python -m bookbound cycle       one full cycle, DRY RUN by default
     python -m bookbound cycle --live    actually submit
+    python -m bookbound run         live loop: cycles on a schedule
+    python -m bookbound run --live --interval 300
+    python -m bookbound flatten     close every open option position
     python -m bookbound audit       decision log summary
     python -m bookbound panic       cancel every open order
 """
@@ -16,6 +19,7 @@ from .audit import AuditLog
 from .book import load_book, missing_greeks
 from .config import load_settings
 from .cycle import run_cycle
+from .runner import run as run_loop
 from .market import Contract, market_clock, option_chain, underlying_price
 from .reconcile import summarise
 from .risk import evaluate
@@ -103,6 +107,38 @@ def cmd_audit(settings) -> int:
     return 0
 
 
+def cmd_run(settings, argv: list[str]) -> int:
+    interval = 300
+    if "--interval" in argv:
+        interval = int(argv[argv.index("--interval") + 1])
+    max_cycles = None
+    if "--max-cycles" in argv:
+        max_cycles = int(argv[argv.index("--max-cycles") + 1])
+    live = "--live" in argv
+    if live:
+        print("*** LIVE MODE - orders will be placed on the paper account ***")
+    return run_loop(settings, interval_seconds=interval, live=live,
+                    max_cycles=max_cycles)
+
+
+def cmd_flatten(settings, live: bool) -> int:
+    from .book import load_book
+    from .execute import close_position
+    from .exits import deadline_flatten
+    book = load_book(settings, {})
+    orders = deadline_flatten(book.raw_positions, "operator flatten")
+    if not orders:
+        print("nothing open")
+        return 0
+    log = AuditLog(settings.audit_path)
+    for order in orders:
+        result = close_position(order, dry_run=not live)
+        print(f"  close {order.symbol} via {order.side}: {result.status}")
+        log.write("flatten", symbol=order.symbol, status=result.status,
+                  ok=result.ok, dry_run=not live)
+    return 0
+
+
 def cmd_panic(settings) -> int:
     from .execute import cancel_all
     print(cancel_all())
@@ -119,6 +155,10 @@ def main(argv: list[str]) -> int:
         return cmd_scan(settings)
     if command == "cycle":
         return cmd_cycle(settings, live="--live" in argv)
+    if command == "run":
+        return cmd_run(settings, argv)
+    if command == "flatten":
+        return cmd_flatten(settings, live="--live" in argv)
     if command == "audit":
         return cmd_audit(settings)
     if command == "panic":

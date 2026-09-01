@@ -37,7 +37,10 @@ ADVERSARY_SYSTEM = """You are the risk officer on an options desk. Your job is t
 find the reason a proposed trade is a BAD idea. You have veto power and you are
 rewarded for catching bad trades, not for approving good ones.
 
-You are given the same shortlist the analyst saw, plus their pick and thesis.
+You are given the proposed trade in full, the analyst's thesis, and the
+alternatives they passed over.
+
+Be brief. Emit the JSON object and nothing else - do not think out loud.
 
 Approve ONLY if the thesis is specific and supported by the numbers shown. Reject
 if the reasoning is generic, the reward/risk is poor, the quotes are wide, the
@@ -103,14 +106,29 @@ def decide(
     picked = by_key[choice]
 
     # --- adversary --------------------------------------------------------
+    review_payload = json.dumps(
+        {
+            "context": context,
+            "proposed_trade": picked.summary(),
+            "analyst_thesis": proposal.get("thesis", ""),
+            "analyst_confidence": proposal.get("confidence"),
+            "rejected_alternatives": [
+                {"key": c.key, "expected_value": c.summary()["expected_value"]}
+                for c in candidates[:6] if c.key != picked.key
+            ],
+        },
+        indent=2,
+        default=str,
+    )
     try:
         review = chat_json(
             base_url=settings.featherless_base,
             api_key=settings.featherless_key,
             model=settings.adversary_model,
             system=ADVERSARY_SYSTEM,
-            user=payload + "\n\nANALYST PICK:\n" + json.dumps(proposal, indent=2),
+            user=review_payload,
             temperature=0.1,
+            max_tokens=settings.adversary_max_tokens,
         )
     except LLMError as exc:
         # A silent adversary must not become an implicit approval.

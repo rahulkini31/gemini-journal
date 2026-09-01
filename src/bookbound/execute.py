@@ -12,6 +12,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 
+from .exits import ExitOrder
 from .structures import Structure
 
 
@@ -106,3 +107,43 @@ def cancel_all() -> str:
     process = subprocess.run(["alpaca", "order", "cancel-all"],
                              capture_output=True, text=True, timeout=45)
     return (process.stdout or process.stderr or "").strip()
+
+
+def close_position(order: ExitOrder, *, dry_run: bool = False) -> OrderResult:
+    """Close one option leg with a marketable order.
+
+    Exits use market orders during session hours: a stop-loss that does not fill
+    is not a stop-loss. Options market orders are rejected outside market hours
+    (verified: 42210000), so the caller must only invoke this while open.
+    """
+    if not cli_available():
+        raise ExecutionError("alpaca CLI not found")
+
+    client_order_id = f"bb-exit-{uuid.uuid4()}"
+    payload = {
+        "symbol": order.symbol,
+        "qty": str(order.qty),
+        "side": order.side,
+        "type": "market",
+        "time_in_force": "day",
+        "position_intent": order.position_intent,
+        "client_order_id": client_order_id,
+    }
+    if dry_run:
+        return OrderResult(True, None, client_order_id, "DRY_RUN", payload)
+
+    process = subprocess.run(
+        ["alpaca", "api", "POST", "/v2/orders"],
+        input=json.dumps(payload), capture_output=True, text=True, timeout=45,
+    )
+    raw = (process.stdout or "") + (process.stderr or "")
+    try:
+        response = json.loads(raw)
+    except json.JSONDecodeError:
+        return OrderResult(False, None, client_order_id, "UNPARSEABLE", payload,
+                           error=raw[:400])
+    if response.get("error") or response.get("code"):
+        return OrderResult(False, None, client_order_id, "REJECTED", payload,
+                           error=json.dumps(response)[:400])
+    return OrderResult(True, response.get("id"), client_order_id,
+                       response.get("status", "unknown"), payload)

@@ -50,6 +50,10 @@ class RiskBudget:
     max_short_delta: float = 0.40             # ...without capping upside too early
     max_width_pct_of_spot: float = 0.06       # a 58-wide SPY spread is a naked long
     max_edge_erosion_pct: float = 0.30        # execution drag vs max loss
+    # exits - entries without exits is not a strategy
+    exit_profit_target_pct: float = 0.50      # bank at +50% of cost basis
+    exit_stop_loss_pct: float = 0.60          # cut at -60%, before max loss
+    exit_time_stop_dte: int = 3               # never hold into expiry week
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,9 @@ class Settings:
     featherless_base: str = "https://api.featherless.ai/v1"
     proposer_model: str = "Qwen/Qwen2.5-72B-Instruct"
     adversary_model: str = "zai-org/GLM-5.2"
+    # GLM-5.2 is a reasoning model: it spends hundreds of tokens before answering,
+    # and a tight budget yields an empty string rather than an error.
+    adversary_max_tokens: int = 2500
 
     @property
     def auth_headers(self) -> dict[str, str]:

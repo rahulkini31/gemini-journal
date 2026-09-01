@@ -246,3 +246,56 @@ class TestVerticalIntegrity(unittest.TestCase):
             self.assertEqual(s.long.underlying, s.short.underlying)
             self.assertEqual(s.long.expiry, s.short.expiry)
             self.assertLess(s.width, 10.0, f"implausible width: {s.width}")
+
+
+class TestExits(unittest.TestCase):
+    """Entries without exits is not a strategy."""
+
+    @staticmethod
+    def pos(symbol, qty=1, side="long", basis=200.0, upl=0.0):
+        return {"asset_class": "us_option", "symbol": symbol, "qty": str(qty),
+                "side": side, "cost_basis": str(basis), "unrealized_pl": str(upl)}
+
+    def far_symbol(self):
+        far = date.today() + timedelta(days=30)
+        return f"SPY{far.strftime('%y%m%d')}C00760000"
+
+    def near_symbol(self):
+        near = date.today() + timedelta(days=1)
+        return f"SPY{near.strftime('%y%m%d')}C00760000"
+
+    def test_profit_target_closes_a_long(self):
+        from bookbound.exits import evaluate_exits
+        out = evaluate_exits([self.pos(self.far_symbol(), upl=120.0)], {}, SETTINGS)
+        self.assertEqual([o.reason for o in out], ["profit_target"])
+        self.assertEqual(out[0].side, "sell")
+        self.assertEqual(out[0].position_intent, "sell_to_close")
+
+    def test_stop_loss_closes_before_max_loss(self):
+        from bookbound.exits import evaluate_exits
+        out = evaluate_exits([self.pos(self.far_symbol(), upl=-140.0)], {}, SETTINGS)
+        self.assertEqual([o.reason for o in out], ["stop_loss"])
+
+    def test_time_stop_overrides_a_winning_position(self):
+        from bookbound.exits import evaluate_exits
+        out = evaluate_exits([self.pos(self.near_symbol(), upl=130.0)], {}, SETTINGS)
+        self.assertEqual([o.reason for o in out], ["time_stop"],
+                         "the calendar rule is absolute")
+
+    def test_short_leg_closes_with_a_buy(self):
+        from bookbound.exits import evaluate_exits
+        out = evaluate_exits(
+            [self.pos(self.far_symbol(), side="short", upl=120.0)], {}, SETTINGS)
+        self.assertEqual(out[0].side, "buy")
+        self.assertEqual(out[0].position_intent, "buy_to_close")
+
+    def test_untouched_position_is_left_alone(self):
+        from bookbound.exits import evaluate_exits
+        self.assertEqual(
+            evaluate_exits([self.pos(self.far_symbol(), upl=10.0)], {}, SETTINGS), [])
+
+    def test_flatten_closes_everything(self):
+        from bookbound.exits import deadline_flatten
+        out = deadline_flatten([self.pos(self.far_symbol(), upl=10.0)], "deadline")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].reason, "flatten")

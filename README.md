@@ -31,11 +31,16 @@ Full design in [`ARCHITECTURE.md`](ARCHITECTURE.md); the research it rests on is
 [`knowledge-base/`](knowledge-base/).
 
 ```
-clock → market snapshot → candidate construction  [deterministic]
-      → proposer + adversary  [two models must agree]
-      → portfolio risk engine [deterministic]
+clock → market snapshot → EXITS FIRST  [deterministic]
+      → candidate construction         [deterministic]
+      → proposer + adversary           [two models must agree]
+      → portfolio risk engine          [deterministic]
       → CLI mleg execution → reconciliation → audit
 ```
+
+Exits run before entries every cycle — profit target +50%, stop loss −60%, time
+stop at 3 DTE — because closing a position always reduces exposure and should
+never wait behind an entry decision. See [`RUNBOOK.md`](RUNBOOK.md) for operating it.
 
 The models never invent a contract, choose a size, or touch an order. They rank a
 shortlist that deterministic code built and priced. **Disagreement between the two models
@@ -52,11 +57,16 @@ export PYTHONPATH=src
 
 python -m bookbound status   # account, book greeks, position health
 python -m bookbound scan     # build + gate candidates. No model, no orders.
-python -m bookbound cycle    # full cycle, DRY RUN
-python -m bookbound cycle --live
+python -m bookbound cycle    # one full cycle, DRY RUN
+python -m bookbound run      # the live loop, DRY RUN
 python -m bookbound audit    # decision log
+python -m bookbound flatten --live   # close every position
 python -m bookbound panic    # cancel everything
 python -m unittest discover -s tests
+
+# unattended
+bash scripts/run-live.sh --live     # detached; tail -f state/runner.log
+bash scripts/stop-live.sh           # graceful stop
 ```
 
 ## What makes it different
@@ -91,6 +101,16 @@ structure and flags naked shorts.
 - Any model error, malformed response, or off-shortlist answer resolves to NO TRADE.
 - Daily drawdown halt at −3%.
 - `python -m bookbound panic` cancels everything.
+
+## Operating it
+
+The loop runs unattended on a 5-minute cycle, sleeping until the next open when
+the market is closed, and **flattens the book 30 minutes before the submission
+deadline**. It halts after 5 consecutive errors, stops cleanly on SIGINT within a
+second, and records `runner_stop` on the way out.
+
+Full procedures, failure modes and the pre-submission checklist:
+[`RUNBOOK.md`](RUNBOOK.md).
 
 ## Status
 

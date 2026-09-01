@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import execute, reconcile
+from .exits import evaluate_exits
 from .agents import decide
 from .audit import AuditLog
 from .book import load_book, missing_greeks
@@ -20,6 +21,7 @@ class CycleReport:
     book_greeks: dict = field(default_factory=dict)
     contracts_seen: int = 0
     candidates: int = 0
+    exits: list = field(default_factory=list)
     outcome: str = "NO_TRADE"
     detail: str = ""
     verdict: dict | None = None
@@ -62,6 +64,26 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
         contracts_seen=len(all_contracts),
         health=health,
     )
+
+    # --- manage exits first ------------------------------------------------
+    # Freeing risk before considering new risk. An exit is never blocked by the
+    # entry gates: closing a position always reduces exposure.
+    for exit_order in evaluate_exits(book.raw_positions, quotes, settings):
+        result = execute.close_position(exit_order, dry_run=dry_run)
+        report.exits.append({
+            "symbol": exit_order.symbol, "reason": exit_order.reason,
+            "detail": exit_order.detail, "ok": result.ok,
+            "status": result.status, "error": result.error,
+        })
+        audit.write("exit" if result.ok else "exit_failed",
+                    symbol=exit_order.symbol, reason=exit_order.reason,
+                    detail=exit_order.detail, side=exit_order.side,
+                    qty=exit_order.qty, status=result.status,
+                    error=result.error, dry_run=dry_run)
+    if report.exits:
+        # positions changed; re-read the book before sizing anything new
+        book = load_book(settings, quotes)
+        report.book_greeks = book.greeks.as_dict()
 
     # --- construct (deterministic, before any model runs) -------------------
     candidates = []
