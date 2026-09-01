@@ -41,7 +41,8 @@ class RiskBudget:
     # circuit breaker
     daily_drawdown_halt_pct: float = 0.03     # -3% on the day stops trading
     # contract selection
-    min_dte: int = 7
+    min_dte: int = 14                          # sub-2-week options price off delayed
+                                              # quotes badly: theta and gamma move too fast
     max_dte: int = 45
     max_quote_spread_pct: float = 0.15        # measured live: near-ATM SPY quoted 5.63/6.83 = ~19% wide
     min_bid: float = 0.05                     # avoid untradeable pennies

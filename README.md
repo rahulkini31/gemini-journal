@@ -43,8 +43,14 @@ stop at 3 DTE — because closing a position always reduces exposure and should
 never wait behind an entry decision. See [`RUNBOOK.md`](RUNBOOK.md) for operating it.
 
 The models never invent a contract, choose a size, or touch an order. They rank a
-shortlist that deterministic code built and priced. **Disagreement between the two models
-resolves to NO TRADE**, and so does any model failure.
+shortlist that deterministic code built, priced, ranked, and pre-filtered against the
+risk budget. **Disagreement between the two models resolves to NO TRADE**, and so does
+any model failure.
+
+They are given real evidence to reason over — 20-day price action, realised volatility,
+range position, and current headlines — because a model asked for a directional thesis
+without directional data can only produce a mechanical one, and the adversary correctly
+rejects those.
 
 ## Quick start
 

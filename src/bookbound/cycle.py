@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import context as market_context
 from . import execute, reconcile
 from .exits import evaluate_exits
 from .agents import decide
@@ -46,10 +47,12 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
     # --- observe -----------------------------------------------------------
     quotes: dict[str, Contract] = {}
     all_contracts: list[Contract] = []
+    spots: dict[str, float] = {}
     for symbol in settings.universe:
         spot = underlying_price(settings, symbol)
         if spot is None:
             continue
+        spots[symbol] = spot
         chain = option_chain(settings, symbol, spot=spot)
         all_contracts.extend(chain)
         quotes.update({c.symbol: c for c in chain})
@@ -121,16 +124,13 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
 
     # --- decide (two models must agree) ------------------------------------
     context = {
-        "equity": round(book.equity, 2),
-        "book_greeks": report.book_greeks,
-        "day_pnl_pct": round(book.day_pnl_pct, 4),
-        "open_option_positions": health["option_positions"],
-        "note": (
-            "Quotes come from Alpaca's free INDICATIVE feed: derived, not OPRA, "
-            "and trades are delayed 15 minutes. Greeks are Black-Scholes values "
-            "computed by Alpaca from those quotes. Treat them as a ranking "
-            "signal, not a pricing oracle."
-        ),
+        "portfolio": {
+            "equity": round(book.equity, 2),
+            "book_greeks": report.book_greeks,
+            "day_pnl_pct": round(book.day_pnl_pct, 4),
+            "open_option_positions": health["option_positions"],
+        },
+        **market_context.build(settings, spots),
     }
     decision = decide(admissible[:10], context, settings)
 
