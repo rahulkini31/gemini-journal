@@ -86,6 +86,19 @@ Two verified defences baked in here:
 - **`greeks == null` is a hard reject, never a zero.** Expired contracts return null Greeks. Any code
   that coerces those to 0.0 will size a position off a delta of zero and trade confidently wrong.
 
+### Shortlist ranking — globally, before truncation
+
+Four builders each emit their own sorted top-N. Concatenating them and slicing the
+front is **not** the same as ranking globally, and the difference is not cosmetic:
+in the live book it handed the proposer ten consecutive negative-EV bull call
+spreads while every strongly positive bear put spread sat outside the slice. The
+model's "none of these have positive expected value" was accurate for its input.
+
+Candidates are now ranked by **expected value per dollar of capital at risk**
+across the whole admissible set before any truncation. The per-trade loss cap is
+enforced inside the generators for the same reason — ranking cannot be relied on
+to preserve compliant candidates.
+
 ### Candidate construction — deterministic, before any model runs
 The LLM never invents a contract, a strike, or a size. It selects from a shortlist that
 deterministic code built and priced. This is the "bounded AI" pattern, but pushed earlier: the model

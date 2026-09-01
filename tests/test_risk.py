@@ -452,3 +452,41 @@ class TestRiskAdjustedRanking(unittest.TestCase):
         small = spread(width=5.0, debit=2.0)
         self.assertGreater(risk_adjusted_ev(small), risk_adjusted_ev(
             spread(width=50.0, debit=20.0)))
+
+
+class TestShortlistRanking(unittest.TestCase):
+    """Regression: the model received an UNSORTED slice of the admissible set.
+
+    Four builders each sort their own output, but concatenating them and taking
+    the first N handed the model whichever family was emitted first. In the live
+    book that was ten consecutive negative-EV bull call spreads, while every
+    strongly positive bear put spread sat outside the slice. The proposer's
+    'none of these have positive expected value' was CORRECT for what it was
+    shown - the defect was upstream.
+    """
+
+    def test_shortlist_is_globally_ranked(self):
+        from bookbound.structures import risk_adjusted_ev
+        pool = [spread(width=5.0, debit=2.0), spread(width=5.0, debit=4.5),
+                spread(width=5.0, debit=1.0), spread(width=5.0, debit=3.0)]
+        ranked = sorted(pool, key=lambda c: -risk_adjusted_ev(c))
+        scores = [risk_adjusted_ev(c) for c in ranked]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertGreaterEqual(risk_adjusted_ev(ranked[0]),
+                                max(risk_adjusted_ev(c) for c in pool))
+
+    def test_concatenating_builders_does_not_preserve_order(self):
+        """The shape of the original bug, in miniature."""
+        from bookbound.structures import risk_adjusted_ev
+        family_a = sorted([spread(width=5.0, debit=4.0),
+                           spread(width=5.0, debit=4.5)],
+                          key=lambda c: -risk_adjusted_ev(c))
+        family_b = sorted([spread(width=5.0, debit=1.0),
+                           spread(width=5.0, debit=1.5)],
+                          key=lambda c: -risk_adjusted_ev(c))
+        concatenated = family_a + family_b
+        best_two = concatenated[:2]
+        globally_best = sorted(concatenated, key=lambda c: -risk_adjusted_ev(c))[:2]
+        self.assertNotEqual([c.net_debit for c in best_two],
+                            [c.net_debit for c in globally_best],
+                            "this test is meaningless if the families tie")

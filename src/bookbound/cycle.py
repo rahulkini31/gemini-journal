@@ -14,6 +14,7 @@ from .risk import evaluate, shrink_to_fit
 from .structures import (
     build_vertical_credit_spreads,
     build_vertical_debit_spreads,
+    risk_adjusted_ev,
 )
 
 
@@ -102,6 +103,11 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
         c for c in candidates
         if evaluate(c, book, settings, unpriced_positions=unpriced).admitted
     ]
+    # Rank GLOBALLY before truncating. Each builder sorts its own output, but
+    # concatenating four builders and slicing the front feeds the model whichever
+    # family happens to be emitted first - which was every negative-EV bull call
+    # spread, while the strongly positive bear put spreads never appeared.
+    admissible.sort(key=lambda c: -risk_adjusted_ev(c))
     report.candidates = len(admissible)
 
     if not admissible:
