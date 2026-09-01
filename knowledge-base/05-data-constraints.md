@@ -155,6 +155,12 @@ say why**; breadth is not a virtue here.
 
 ---
 
+### Credit vs debit under a wide feed
+
+Both directions cross the spread, so execution drag applies either way — selling at the bid costs
+exactly as much as buying at the ask. Measured live, debit verticals showed drag of $1.39–$13.61 per
+spread. What differs is the payoff shape, not the transaction cost.
+
 ### What this page implies for design
 
 1. **Greeks + IV are free.** Build delta/IV-driven selection — it is the highest-sophistication,

@@ -71,6 +71,12 @@ bash scripts/stop-live.sh           # graceful stop
 
 ## What makes it different
 
+**Both spread directions.** Debit verticals (bull call / bear put) and credit verticals (bear call /
+bull put), selected by risk-adjusted expected value. Alpaca's `mleg` `limit_price` is signed —
+positive debit, negative credit — with **no server-side validation**, so a sign error is silent and
+fills against you. Credits are stored negative throughout and a dedicated test class guards the
+boundary.
+
 **Portfolio-level Greek budgeting.** The differentiator. `tests/test_risk.py` contains the
 proof: twenty individually-compliant spreads, refused by a *portfolio* gate before the
 book runs away.
@@ -84,6 +90,7 @@ delayed 15 minutes. Verified consequences, encoded as defences:
 | Expired contracts return `greeks: null` | null greeks are a **hard reject**, never a zero |
 | Quotes run wide (measured 5.63/6.83, ~19%) | quote-width filter; limits priced off real bid/ask, never mid |
 | Crossing the spread costs expected value | **execution drag** is computed and gated |
+| `limit_price` sign is unvalidated server-side | credits stored negative end-to-end; `TestCreditSignConvention` guards it |
 | Held positions we cannot price | risk engine **fails closed** |
 
 **Execution quality.** Paper injects random partial fills ~10% of the time. On a two-leg

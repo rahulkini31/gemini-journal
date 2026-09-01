@@ -1,6 +1,7 @@
 # 09 — Open Questions
 
-> **Q1–Q7 were all resolved against the live account on 2026-09-01 —
+> **Q1–Q7 and the MLEG credit sign convention were all resolved against the live account on
+> 2026-09-01 —
 > see [`10-verification-log.md`](10-verification-log.md).** The rest stand open.
 
 Everything here is **unverified**. Each item names the exact command or action that settles it.

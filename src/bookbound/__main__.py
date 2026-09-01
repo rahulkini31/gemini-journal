@@ -23,7 +23,10 @@ from .runner import run as run_loop
 from .market import Contract, market_clock, option_chain, underlying_price
 from .reconcile import summarise
 from .risk import evaluate
-from .structures import build_vertical_debit_spreads
+from .structures import (
+    build_vertical_credit_spreads,
+    build_vertical_debit_spreads,
+)
 
 
 def _chains(settings):
@@ -64,9 +67,13 @@ def cmd_scan(settings) -> int:
     book = load_book(settings, quotes)
     unpriced = missing_greeks(book, quotes)
 
+    loss_cap = book.equity * settings.risk.max_loss_per_trade_pct
     built = []
     for kind in ("C", "P"):
-        built.extend(build_vertical_debit_spreads(contracts, settings, kind=kind))
+        built.extend(build_vertical_debit_spreads(
+            contracts, settings, kind=kind, max_loss_cap=loss_cap))
+        built.extend(build_vertical_credit_spreads(
+            contracts, settings, kind=kind, max_loss_cap=loss_cap))
     print(f"\n{len(built)} structures built from {len(contracts)} contracts")
 
     admitted = 0

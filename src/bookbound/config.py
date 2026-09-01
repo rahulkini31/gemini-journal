@@ -49,6 +49,7 @@ class RiskBudget:
     min_short_delta: float = 0.15             # short leg must finance the long
     max_short_delta: float = 0.40             # ...without capping upside too early
     max_width_pct_of_spot: float = 0.06       # a 58-wide SPY spread is a naked long
+    credit_short_target_delta: float = 0.25   # short leg ~25 delta: premium with room
     max_edge_erosion_pct: float = 0.30        # execution drag vs max loss
     # exits - entries without exits is not a strategy
     exit_profit_target_pct: float = 0.50      # bank at +50% of cost basis

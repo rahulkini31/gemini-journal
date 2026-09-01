@@ -299,3 +299,156 @@ class TestExits(unittest.TestCase):
         out = deadline_flatten([self.pos(self.far_symbol(), upl=10.0)], "deadline")
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].reason, "flatten")
+
+
+class TestCreditSignConvention(unittest.TestCase):
+    """Alpaca's mleg limit_price: positive = debit, negative = credit.
+
+    There is NO server-side sign validation - all four probe values, including
+    a negative and an economically impossible one, were accepted. A wrong sign
+    is therefore silent and fills against us, which makes these tests the only
+    thing standing between a credit strategy and giving the credit away.
+    """
+
+    def credit_spread(self):
+        from bookbound.structures import _price_credit_spread
+        short = contract("SHORT", 770.0, delta=0.42, bid=6.49, ask=6.66)
+        long = contract("LONG", 775.0, delta=0.33, bid=4.30, ask=4.33)
+        built = _price_credit_spread(long, short, "C", EXPIRY)
+        assert built is not None
+        return built
+
+    def test_credit_structure_is_flagged(self):
+        s = self.credit_spread()
+        self.assertTrue(s.is_credit)
+        self.assertLess(s.net_debit, 0, "a credit must be stored negative")
+
+    def test_limit_price_is_negative_for_a_credit(self):
+        price = self.credit_spread().limit_price()
+        self.assertLess(price, 0,
+                        "positive limit on a credit spread reads as 'I will PAY "
+                        "that much', which hands the credit away")
+
+    def test_limit_price_is_positive_for_a_debit(self):
+        self.assertGreater(spread().limit_price(), 0)
+
+    def test_submitted_payload_carries_the_sign(self):
+        from bookbound.execute import build_mleg_payload
+        payload = build_mleg_payload(self.credit_spread(), client_order_id="t")
+        self.assertTrue(payload["limit_price"].startswith("-"),
+                        f"got {payload['limit_price']!r}")
+
+    def test_credit_max_loss_is_width_minus_credit(self):
+        s = self.credit_spread()
+        credit = -s.net_debit
+        self.assertAlmostEqual(s.max_gain, credit * 100, places=4)
+        self.assertAlmostEqual(s.max_loss, (s.width - credit) * 100, places=4)
+        self.assertAlmostEqual(s.max_gain + s.max_loss, s.width * 100, places=4)
+
+    def test_credit_ev_uses_inverted_probabilities(self):
+        """A credit spread wins when the short expires worthless - the opposite
+        of the debit case. Getting this backwards would rank the worst trades
+        highest."""
+        from bookbound.structures import expected_value
+        s = self.credit_spread()
+        # short delta 0.42 -> ~58% chance of keeping the credit
+        self.assertGreater(expected_value(s), -s.max_loss,
+                           "EV must not collapse to max loss")
+        ev_terms = (1.0 - abs(s.short.delta)) * s.max_gain \
+            - abs(s.long.delta) * s.max_loss
+        self.assertAlmostEqual(expected_value(s), ev_terms, places=2)
+
+    def test_aggression_always_moves_price_against_us(self):
+        """Asserted in economic terms, not raw sign.
+
+        Because a credit is a NEGATIVE number, "worse for us" means the value
+        moves UP toward zero - the opposite numeric direction to the debit case.
+        Comparing raw limit prices here is exactly the confusion this whole test
+        class exists to prevent, so compare credit RECEIVED and debit PAID.
+        """
+        credit = self.credit_spread()
+        received_optimistic = -credit.limit_price(aggression=0.0)
+        received_natural = -credit.limit_price(aggression=1.0)
+        self.assertLess(received_natural, received_optimistic,
+                        "more aggression must mean receiving LESS credit")
+        self.assertGreater(received_natural, 0, "we must still be paid")
+
+        debit = spread()
+        paid_optimistic = debit.limit_price(aggression=0.0)
+        paid_natural = debit.limit_price(aggression=1.0)
+        self.assertGreater(paid_natural, paid_optimistic,
+                           "more aggression must mean paying MORE debit")
+
+    def test_rejects_credit_exceeding_width(self):
+        from bookbound.structures import _price_credit_spread
+        short = contract("S", 770.0, bid=9.0, ask=9.1)
+        long = contract("L", 772.0, bid=1.0, ask=1.1)   # credit 7.9 > width 2
+        self.assertIsNone(_price_credit_spread(long, short, "C", EXPIRY))
+
+
+class TestCreditPairing(unittest.TestCase):
+    """Regression: credit strike ordering is the INVERSE of the debit case, and
+    reusing the debit check silently produced zero candidates."""
+
+    def test_bear_call_sells_the_lower_strike(self):
+        from bookbound.structures import _is_valid_credit_pair
+        low = contract("LOW", 770.0)
+        high = contract("HIGH", 775.0)
+        self.assertTrue(_is_valid_credit_pair(high, low, "C"))
+        self.assertFalse(_is_valid_credit_pair(low, high, "C"))
+
+    def test_bull_put_sells_the_higher_strike(self):
+        from bookbound.structures import _is_valid_credit_pair
+        low = contract("LOW", 750.0, kind="P")
+        high = contract("HIGH", 755.0, kind="P")
+        self.assertTrue(_is_valid_credit_pair(low, high, "P"))
+        self.assertFalse(_is_valid_credit_pair(high, low, "P"))
+
+    def test_builder_actually_produces_credit_candidates(self):
+        from bookbound.structures import build_vertical_credit_spreads
+        pool = [
+            Contract(symbol=f"SPY_C{i}", underlying="SPY", expiry=EXPIRY, kind="C",
+                     strike=770.0 + i, bid=6.5 - i * 0.55, ask=6.6 - i * 0.55,
+                     delta=0.42 - i * 0.05, gamma=0.02, theta=-0.4, vega=0.1, iv=0.2)
+            for i in range(5)
+        ]
+        built = build_vertical_credit_spreads(pool, SETTINGS, kind="C")
+        self.assertTrue(built, "credit builder produced nothing")
+        for s in built:
+            self.assertTrue(s.is_credit)
+            self.assertGreater(s.long.strike, s.short.strike)
+
+
+class TestRiskAdjustedRanking(unittest.TestCase):
+    """Regression: ranking on absolute EV crowded every risk-compliant candidate
+    off the shortlist, so the risk engine refused all 24 credit spreads."""
+
+    def test_narrow_candidates_survive_truncation(self):
+        from bookbound.structures import build_vertical_credit_spreads
+        # a 25-delta short plus longs at many widths, narrow through very wide
+        pool = [Contract(symbol="SPY_SHORT", underlying="SPY", expiry=EXPIRY,
+                         kind="C", strike=770.0, bid=6.50, ask=6.60, delta=0.25,
+                         gamma=0.02, theta=-0.4, vega=0.1, iv=0.2)]
+        for width in range(1, 40):
+            pool.append(Contract(
+                symbol=f"SPY_L{width}", underlying="SPY", expiry=EXPIRY, kind="C",
+                strike=770.0 + width, bid=max(6.4 - width * 0.16, 0.06),
+                ask=max(6.5 - width * 0.16, 0.08),
+                delta=max(0.24 - width * 0.006, 0.01), gamma=0.02, theta=-0.4,
+                vega=0.1, iv=0.2))
+        cap = 100_000.0 * SETTINGS.risk.max_loss_per_trade_pct
+        built = build_vertical_credit_spreads(pool, SETTINGS, kind="C",
+                                              max_candidates=12,
+                                              max_loss_cap=cap)
+        self.assertTrue(built, "generator emitted nothing under the cap")
+        self.assertTrue(
+            all(s.max_loss <= cap for s in built),
+            f"generator emitted a structure the risk engine must refuse; "
+            f"max losses were {sorted(s.max_loss for s in built)}",
+        )
+
+    def test_risk_adjusted_ev_prefers_capital_efficiency(self):
+        from bookbound.structures import risk_adjusted_ev
+        small = spread(width=5.0, debit=2.0)
+        self.assertGreater(risk_adjusted_ev(small), risk_adjusted_ev(
+            spread(width=50.0, debit=20.0)))

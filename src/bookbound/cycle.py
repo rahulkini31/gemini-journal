@@ -11,7 +11,10 @@ from .book import load_book, missing_greeks
 from .config import Settings
 from .market import Contract, market_clock, option_chain, underlying_price
 from .risk import evaluate, shrink_to_fit
-from .structures import build_vertical_debit_spreads
+from .structures import (
+    build_vertical_credit_spreads,
+    build_vertical_debit_spreads,
+)
 
 
 @dataclass
@@ -86,11 +89,13 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
         report.book_greeks = book.greeks.as_dict()
 
     # --- construct (deterministic, before any model runs) -------------------
+    loss_cap = book.equity * settings.risk.max_loss_per_trade_pct
     candidates = []
     for kind in ("C", "P"):
-        candidates.extend(
-            build_vertical_debit_spreads(all_contracts, settings, kind=kind)
-        )
+        candidates.extend(build_vertical_debit_spreads(
+            all_contracts, settings, kind=kind, max_loss_cap=loss_cap))
+        candidates.extend(build_vertical_credit_spreads(
+            all_contracts, settings, kind=kind, max_loss_cap=loss_cap))
     # keep only structures that already pass the gates - the model never sees
     # anything the risk engine would refuse
     admissible = [

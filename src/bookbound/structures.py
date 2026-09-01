@@ -24,10 +24,17 @@ class Structure:
     qty: int
     long: Contract
     short: Contract
-    net_debit: float          # per spread, per share (positive = we pay)
+    net_debit: float          # per spread, per share. POSITIVE = we pay a debit,
+                              # NEGATIVE = we receive a credit. This mirrors
+                              # Alpaca's mleg limit_price convention exactly, so
+                              # the sign never has to be flipped at the boundary.
     max_loss: float           # dollars, total for qty
     max_gain: float           # dollars, total for qty
     rationale: str = ""
+
+    @property
+    def is_credit(self) -> bool:
+        return self.net_debit < 0
 
     @property
     def width(self) -> float:
@@ -51,16 +58,27 @@ class Structure:
         )
 
     def limit_price(self, *, aggression: float = 0.5) -> float:
-        """Conservative limit for a net-debit spread.
+        """Limit price in Alpaca's mleg convention.
 
-        We pay between the natural mid and the full ask. Never assume a mid
-        fill - the indicative feed quotes wide (a near-ATM SPY call was
-        measured at 5.63/6.83, ~19%), so a mid-priced order often just sits.
-        ``aggression`` 0.0 = mid, 1.0 = pay the full spread.
+        Per the Trading API reference and the alpaca-py source:
+          "A positive value indicates a debit, representing a cost or payment to
+           be made. A negative value signifies a credit, reflecting an amount to
+           be received."
+
+        There is NO server-side sign validation - a wrong sign is accepted
+        silently and fills against you. A credit spread submitted at +0.01 reads
+        as "I will pay up to a 1c debit", which a structure worth 2.16 of credit
+        satisfies immediately, handing the credit away.
+
+        Both directions cross the spread, so ``aggression`` always moves the
+        price AGAINST us: 0.0 = optimistic mid, 1.0 = the natural price.
         """
-        natural = self.long.ask - self.short.bid   # worst case
-        mid = self.long.mid - self.short.mid       # optimistic
+        natural = self.long.ask - self.short.bid   # pay more / receive less
+        mid = self.long.mid - self.short.mid
         price = mid + (natural - mid) * aggression
+        # keep the sign; only clamp the magnitude away from zero
+        if price < 0:
+            return min(round(price, 2), -0.01)
         return max(round(price, 2), 0.01)
 
     def summary(self) -> dict:
@@ -75,11 +93,13 @@ class Structure:
             "short": self.short.symbol,
             "width": self.width,
             "net_debit": round(self.net_debit, 2),
+            "structure_type": "credit" if self.is_credit else "debit",
             "limit_price": self.limit_price(),
             "max_loss": round(self.max_loss, 2),
             "max_gain": round(self.max_gain, 2),
             "reward_risk": round(self.max_gain / self.max_loss, 2) if self.max_loss else 0,
             "expected_value": round(expected_value(self), 2),
+            "ev_per_dollar_risked": round(risk_adjusted_ev(self), 4),
             "fair_value_ev": round(fair_value_ev(self), 2),
             "execution_drag": round(execution_drag(self), 2),
             "long_delta": round(self.long.delta, 4),
@@ -98,6 +118,7 @@ def build_vertical_debit_spreads(
     target_delta: float = 0.45,
     max_candidates: int = 12,
     spot: float | None = None,
+    max_loss_cap: float | None = None,
 ) -> list[Structure]:
     """Construct defined-risk vertical DEBIT spreads.
 
@@ -144,20 +165,154 @@ def build_vertical_debit_spreads(
             if structure is not None:
                 candidates.append(structure)
 
-    # Rank by a crude delta-weighted expected value rather than raw reward/risk.
-    # Raw R:R always prefers the widest spread with the most worthless short leg;
-    # EV penalises the low probability of ever reaching that payoff.
-    candidates.sort(key=lambda s: -expected_value(s))
+    # Enforce the per-trade loss cap HERE, not downstream. Ranking cannot be
+    # relied on to preserve compliant candidates: sorting by EV (absolute or
+    # risk-adjusted) favours wide, high-notional spreads, which crowded every
+    # affordable candidate off a truncated shortlist. The generator must not
+    # emit what the risk engine will certainly refuse.
+    if max_loss_cap is not None:
+        candidates = [c for c in candidates if c.max_loss <= max_loss_cap]
+
+    candidates.sort(key=lambda s: -risk_adjusted_ev(s))
     return candidates[:max_candidates]
 
 
-def expected_value_at(structure: Structure, debit: float) -> float:
-    """Delta-weighted EV proxy for a given entry cost, in dollars."""
-    p_max_gain = abs(structure.short.delta)
-    p_max_loss = 1.0 - abs(structure.long.delta)
-    max_gain = (structure.width - debit) * CONTRACT_MULTIPLIER * structure.qty
-    max_loss = debit * CONTRACT_MULTIPLIER * structure.qty
+def expected_value_at(structure: Structure, net_debit: float) -> float:
+    """Delta-weighted EV proxy for a given entry price, in dollars.
+
+    Delta approximates the risk-neutral probability of finishing ITM.
+
+    DEBIT spread (we buy the near strike, sell the far one):
+        max gain needs spot beyond the SHORT strike  -> p ~ |short delta|
+        max loss needs spot below the LONG strike    -> p ~ 1 - |long delta|
+
+    CREDIT spread (we sell the near strike, buy the far one):
+        max gain needs the SHORT to expire worthless -> p ~ 1 - |short delta|
+        max loss needs spot beyond the LONG strike   -> p ~ |long delta|
+    """
+    scale = CONTRACT_MULTIPLIER * structure.qty
+    if net_debit < 0:                       # credit
+        credit = -net_debit
+        max_gain = credit * scale
+        max_loss = (structure.width - credit) * scale
+        p_max_gain = 1.0 - abs(structure.short.delta)
+        p_max_loss = abs(structure.long.delta)
+    else:                                   # debit
+        max_gain = (structure.width - net_debit) * scale
+        max_loss = net_debit * scale
+        p_max_gain = abs(structure.short.delta)
+        p_max_loss = 1.0 - abs(structure.long.delta)
     return p_max_gain * max_gain - p_max_loss * max_loss
+
+
+def build_vertical_credit_spreads(
+    contracts: list[Contract],
+    settings: Settings,
+    *,
+    kind: str,
+    max_candidates: int = 12,
+    spot: float | None = None,
+    max_loss_cap: float | None = None,
+) -> list[Structure]:
+    """Construct defined-risk vertical CREDIT spreads.
+
+    ``kind`` "C" builds bear call spreads (sell the nearer call, buy the further
+    one); "P" builds bull put spreads. Max loss is width minus credit, known
+    exactly at entry.
+    """
+    budget = settings.risk
+    usable = [c for c in contracts if c.kind == kind and tradeable(c, settings)]
+    if len(usable) < 2:
+        return []
+
+    by_series: dict[tuple[str, date], list[Contract]] = {}
+    for contract in usable:
+        by_series.setdefault((contract.underlying, contract.expiry), []).append(contract)
+
+    candidates: list[Structure] = []
+    for (_underlying, expiry), group in by_series.items():
+        group.sort(key=lambda c: c.strike)
+        # short leg near the target delta: enough premium to be worth selling,
+        # far enough OTM to keep a high probability of expiring worthless
+        anchor = min(
+            group,
+            key=lambda c: abs(abs(c.delta) - budget.credit_short_target_delta),
+        )
+        for long in group:
+            if not _is_valid_credit_pair(long, anchor, kind):
+                continue
+            reference = spot or anchor.strike
+            if abs(anchor.strike - long.strike) > reference * budget.max_width_pct_of_spot:
+                continue
+            structure = _price_credit_spread(long, anchor, kind, expiry)
+            if structure is not None:
+                candidates.append(structure)
+
+    # Enforce the per-trade loss cap HERE, not downstream. Ranking cannot be
+    # relied on to preserve compliant candidates: sorting by EV (absolute or
+    # risk-adjusted) favours wide, high-notional spreads, which crowded every
+    # affordable candidate off a truncated shortlist. The generator must not
+    # emit what the risk engine will certainly refuse.
+    if max_loss_cap is not None:
+        candidates = [c for c in candidates if c.max_loss <= max_loss_cap]
+
+    candidates.sort(key=lambda s: -risk_adjusted_ev(s))
+    return candidates[:max_candidates]
+
+
+def _price_credit_spread(
+    long: Contract, short: Contract, kind: str, expiry: date
+) -> Structure | None:
+    """Price a credit vertical from real quotes. Returns None if not viable."""
+    if long.underlying != short.underlying or long.expiry != short.expiry \
+            or long.kind != short.kind:
+        return None
+    width = abs(long.strike - short.strike)
+    if width <= 0:
+        return None
+
+    # we sell the short at the bid and buy the long at the ask: the honest credit
+    credit = short.bid - long.ask
+    if credit <= 0:
+        return None                       # not a credit spread
+    if credit >= width:
+        return None                       # implausible: free money
+
+    name = "bear_call_spread" if kind == "C" else "bull_put_spread"
+    direction = "bearish" if kind == "C" else "bullish"
+    return Structure(
+        name=name,
+        underlying=long.underlying,
+        expiry=expiry,
+        qty=1,
+        long=long,
+        short=short,
+        net_debit=-credit,                # NEGATIVE: Alpaca's credit convention
+        max_loss=(width - credit) * CONTRACT_MULTIPLIER,
+        max_gain=credit * CONTRACT_MULTIPLIER,
+        rationale=(
+            f"{direction} {width:.0f}-wide credit vertical, "
+            f"collect {credit:.2f}, risk {width - credit:.2f}"
+        ),
+    )
+
+
+def risk_adjusted_ev(structure: Structure) -> float:
+    """Expected value per dollar of capital at risk.
+
+    Ranking on ABSOLUTE expected value is a trap. A wide, high-notional spread
+    always shows a bigger EV than a narrow one, so sorting by it and truncating
+    the shortlist crowded out every candidate small enough to pass the per-trade
+    loss cap - the builder produced 24 credit spreads and the risk engine refused
+    all 24 for exceeding it.
+
+    Normalising by max loss ranks capital efficiency instead, which is both the
+    economically meaningful comparison and the one that keeps admissible
+    candidates on the shortlist.
+    """
+    if structure.max_loss <= 0:
+        return 0.0
+    return expected_value(structure) / structure.max_loss
 
 
 def fair_value_ev(structure: Structure) -> float:
@@ -192,6 +347,22 @@ def expected_value(structure: Structure) -> float:
     model. It exists to stop reward/risk from always winning.
     """
     return expected_value_at(structure, structure.net_debit)
+
+
+def _is_valid_credit_pair(long: Contract, short: Contract, kind: str) -> bool:
+    """Strike ordering for a CREDIT vertical - the inverse of the debit case.
+
+    Bear call spread: sell the LOWER call, buy the HIGHER one for protection.
+    Bull put spread:  sell the HIGHER put, buy the LOWER one for protection.
+    """
+    if long.symbol == short.symbol:
+        return False
+    if long.underlying != short.underlying or long.expiry != short.expiry \
+            or long.kind != short.kind:
+        return False
+    if kind == "C":
+        return long.strike > short.strike
+    return long.strike < short.strike
 
 
 def _is_valid_pair(long: Contract, short: Contract, kind: str) -> bool:

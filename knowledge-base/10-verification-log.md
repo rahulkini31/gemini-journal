@@ -204,9 +204,47 @@ positions   : 0
 equity      : $100,000
 ```
 
-## Still open
+## ✅ RESOLVED — MLEG `limit_price` sign convention
 
-- **Sign convention for MLEG `limit_price` on net-credit structures** (new, from the Q6 test design).
+**Positive is a debit, negative is a credit.** Confirmed verbatim by two independent authoritative
+sources:
+
+> "In case of `mleg`, the limit_price parameter is expressed with the following notation:
+> - A positive value indicates a debit, representing a cost or payment to be made.
+> - A negative value signifies a credit, reflecting an amount to be received."
+>
+> — Trading API reference (`POST /v2/orders`), and the same text in `alpaca-py`'s
+> `LimitOrderRequest` / `StopLimitOrderRequest` docstrings.
+
+### 🚨 There is NO server-side sign validation
+
+Probed live (market closed, every order cancelled immediately — `scripts/probe-credit-sign.sh`).
+A bear call spread worth ~2.16 of credit, width 5.00:
+
+| Probe | `limit_price` | Result |
+|---|---|---|
+| plausible credit | `2.00` | **accepted** |
+| negative | `-2.00` | **accepted**, echoed as `-2` |
+| above max possible credit | `9.00` | **accepted** |
+| near zero | `0.01` | **accepted** |
+
+All four accepted — including a value economically impossible as a credit. `alpaca-py` has no sign
+assertion either. **A wrong sign is therefore silent**, and it fills against you:
+
+- A credit spread submitted at `+0.01` reads as *"I will pay up to a 1c debit."* A structure worth
+  2.16 of credit satisfies that instantly — you hand the credit away.
+- A credit spread submitted at `+9.00` reads as *"I will pay up to $9"* on a 5-wide spread.
+
+**Acceptance proves nothing about correctness here.** The only defences are the docs and your own
+tests. `tests/test_risk.py::TestCreditSignConvention` exists solely for this.
+
+### Why the probe was safe
+Market closed, so nothing could fill; the script hard-refuses to run when `is_open` is not `false`,
+and cancels after every probe. There is no single safe positive limit for a credit structure —
+`0.01` fills instantly under one reading and `9.00` under the other — so market-closed is the
+*only* safe window.
+
+## Still open
 - **Q3 confirmation during market hours.**
 - **Q8–Q10** — judging weights and P&L interpretation (Discord questions).
 - **Q11–Q13** — MCP multi-leg parameter shape, real installed tool count, Featherless concurrency.
