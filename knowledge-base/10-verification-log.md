@@ -101,10 +101,48 @@ exploiting if agent prompts share a long stable prefix.
 `is_open: false`, next open **2026-09-01T09:30:00-04:00** (13:30 UTC). Verification ran at 02:08 ET,
 pre-market. **No trading time has been lost.**
 
-## Still unresolved — carry forward from `09-open-questions.md`
+## ✅ Alpaca CLI installed and authenticated
 
-- **Q2** — does `alpaca api POST /v2/orders` actually place an MLEG order? *(requires placing a test
-  order on the judged account — not done without approval)*
-- **Q3** — do MLEG orders accept `type: "market"`?
+`brew install alpacahq/tap/cli` → **v0.0.14**. Authenticates against the competition account purely
+from `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` in the environment — no `alpaca profile login` needed,
+which makes it trivially usable from a cron job or a container.
+
+```
+$ alpaca account get --jq '{acct:.account_number, lvl:.options_trading_level, eq:.equity}'
+{ "acct": "PA3S4EFAEQLX", "eq": "100000", "lvl": 3 }
+```
+
+Read-only commands confirmed working: `alpaca account get`, `alpaca clock`, `alpaca order list`,
+`alpaca position list`, `alpaca data option chain` (returned 100 snapshots).
+
+⚠️ `alpaca option contracts --underlying-symbol SPY` returned `{"code": 0, …}` rather than a contract
+list — the response shape differs from the docs. Prefer `alpaca data option chain` for discovery, or
+inspect this command's real output shape before depending on it.
+
+**This is the half of Q2 that could be answered without trading: the CLI works, authenticates, and
+reads.** Whether its raw `api POST` passthrough accepts an MLEG payload is still open.
+
+## Account state after verification — clean
+
+```
+open orders : 0
+positions   : 0
+equity      : $100,000
+```
+
+No test orders were placed. Nothing pollutes the judged trading history.
+
+## Still unresolved — require placing a test order
+
+The three MLEG questions all need a live order submission, which the sandbox blocked. They are the
+**highest-priority** remaining unknowns because the entire "satisfy the CLI requirement while trading
+spreads" strategy in `03-agent-surfaces.md` rests on Q2.
+
+- **Q2** — does `alpaca api POST /v2/orders` accept an `order_class: "mleg"` payload?
+- **Q3** — do MLEG orders accept `type: "market"`, or is limit genuinely the only option?
 - **Q6** — four-leg iron condor `ratio_qty` / `position_intent` behaviour
+
+Prepared test payloads (unfillable limits, cancel immediately afterwards) are in
+`scripts/verify-mleg.sh`.
+
 - **Q8–Q10** — judging weights and P&L interpretation (Discord questions)
