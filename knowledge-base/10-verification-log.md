@@ -132,17 +132,81 @@ equity      : $100,000
 
 No test orders were placed. Nothing pollutes the judged trading history.
 
-## Still unresolved — require placing a test order
+## ✅ Q2, Q3, Q6 RESOLVED — MLEG verified end-to-end
 
-The three MLEG questions all need a live order submission, which the sandbox blocked. They are the
-**highest-priority** remaining unknowns because the entire "satisfy the CLI requirement while trading
-spreads" strategy in `03-agent-surfaces.md` rests on Q2.
+Run via `scripts/verify-mleg.sh`. Every order used an unfillable price and was cancelled; the account
+finished flat at $100,000 with 0 orders and 0 positions.
 
-- **Q2** — does `alpaca api POST /v2/orders` accept an `order_class: "mleg"` payload?
-- **Q3** — do MLEG orders accept `type: "market"`, or is limit genuinely the only option?
-- **Q6** — four-leg iron condor `ratio_qty` / `position_intent` behaviour
+### Q2 — `alpaca api POST /v2/orders` accepts MLEG ✅
 
-Prepared test payloads (unfillable limits, cancel immediately afterwards) are in
-`scripts/verify-mleg.sh`.
+```
+ACCEPTED id=faf9e8ea-539f-448e-8308-b3e6aee31b50  status=accepted  class=mleg  type=limit
+  leg SPY260918C00765000 buy  ratio=1 intent=buy_to_open
+  leg SPY260918C00770000 sell ratio=1 intent=sell_to_open
+```
 
-- **Q8–Q10** — judging weights and P&L interpretation (Discord questions)
+**This is the load-bearing result.** The CLI has no first-class multi-leg submit command, so the raw
+passthrough was the proposed route for satisfying the CLI requirement *while* trading spreads. It
+works. The hybrid architecture in `03-agent-surfaces.md` — read-only MCP for reasoning, CLI for
+execution — is viable exactly as designed.
+
+### Q3 — market MLEG orders are allowed, but only in session ✅
+
+```json
+{ "code": 42210000,
+  "error": "options market orders are only allowed during market hours",
+  "status": 422 }
+```
+
+Note what this is *not*: it is not "market orders are unsupported for mleg". It is a **session**
+restriction. Inside 13:30–20:00 UTC, market MLEG should work. The KB previously assumed limit-only —
+that assumption was too strong, though limit remains mandatory outside RTH.
+
+⚠️ Still worth one confirmation run during market hours.
+
+### Q6 — four legs accepted, ratio 1:1:1:1 ✅
+
+```
+ACCEPTED id=b71038f6-4b44-4e24-b2e0-6c151fd0d9c0  status=accepted  class=mleg  type=limit
+  leg SPY260918C00765000 buy  ratio=1 intent=buy_to_open
+  leg SPY260918C00770000 sell ratio=1 intent=sell_to_open
+  leg SPY260918P00755000 buy  ratio=1 intent=buy_to_open
+  leg SPY260918P00750000 sell ratio=1 intent=sell_to_open
+```
+
+Four-leg construction works with per-leg `position_intent`.
+
+> **Test-design note.** The structure used is a *net debit* (long call spread + long put spread,
+> ~$3.78), deliberately not a credit iron condor. With a credit structure, a `limit_price` of `0.01`
+> could mean "accept at least $0.01 credit" and **fill at the open**. A debit structure at `0.01` is
+> unfillable under either sign convention. **The sign convention for MLEG `limit_price` on credit
+> structures is still unverified — establish it before placing any credit spread.**
+
+### Q6b — the GCD rule is enforced, with a parseable error ✅
+
+```json
+{ "code": 42210000,
+  "error": "leg ratio quantities should be relatively prime: GCD[2 2] = 2",
+  "status": 422 }
+```
+
+Documented behaviour, confirmed exactly. Normalise `ratio_qty` by its GCD before submitting.
+
+### Operational detail
+**The CLI writes error JSON to stderr, not stdout** (matching the documented exit-code design).
+Capture `2>&1` when parsing failures, or your error handling will see an empty string.
+
+## Account state after all testing — clean
+
+```
+open orders : 0
+positions   : 0
+equity      : $100,000
+```
+
+## Still open
+
+- **Sign convention for MLEG `limit_price` on net-credit structures** (new, from the Q6 test design).
+- **Q3 confirmation during market hours.**
+- **Q8–Q10** — judging weights and P&L interpretation (Discord questions).
+- **Q11–Q13** — MCP multi-leg parameter shape, real installed tool count, Featherless concurrency.

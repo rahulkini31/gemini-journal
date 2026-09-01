@@ -86,7 +86,9 @@ collateral*, not premium.
 ### Leg fields
 - `symbol` — OCC contract symbol
 - `ratio_qty` — relative proportion. **The greatest common divisor across all legs must be 1.**
-  A 2:2 condor is invalid; express it as 1:1.
+  A 2:2 condor is invalid; express it as 1:1. Verified — the API rejects it with a parseable message:
+  `"leg ratio quantities should be relatively prime: GCD[2 2] = 2"`. Normalise ratios by their GCD
+  before submitting.
 - `side` — `buy` | `sell`
 - `position_intent` — `buy_to_open` | `sell_to_open` | `buy_to_close` | `sell_to_close`
 
@@ -95,8 +97,9 @@ collateral*, not premium.
   single MLEG order. Legging in manually means the equity leg is unprotected in between.
 - ❌ **"An MLeg order is accepted only if all its legs are covered within the same MLeg order."**
   No naked short legs.
-- ⚠️ Every documented example uses `type: "limit"` and `time_in_force: "day"`. Market MLEG orders are
-  not documented — do not assume they work (see `09-open-questions.md`).
+- ✅ **Market MLEG orders ARE supported — but only during market hours.** Verified: submitting one
+  pre-market returns `42210000: "options market orders are only allowed during market hours"`. That
+  is a session restriction, not a structural one. Outside 13:30–20:00 UTC you must use limit orders.
 - ⚠️ Limit + day means **an unfilled spread simply expires at the close.** Your agent must detect
   the non-fill and decide whether to re-price, not assume it is in the trade.
 
@@ -104,6 +107,9 @@ collateral*, not premium.
 Long call spread · long put spread · **iron condor** · rolls (close existing, open new strikes/expiry).
 Straddles, strangles, calendars and butterflies are referenced only in passing — constructible in
 principle, but unverified in the docs.
+
+**Verified live:** a four-leg 1:1:1:1 structure (long call spread + long put spread) was accepted with
+per-leg `position_intent`. Four-leg construction works.
 
 ### Margin — the "universal spread rule"
 1. Maintenance margin is computed from the **piecewise-linear payoff**: the theoretical maximum loss

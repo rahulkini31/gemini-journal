@@ -165,8 +165,11 @@ but it can post any payload:
 echo '{"order_class":"mleg","qty":"1","type":"limit","limit_price":"1.00",
        "time_in_force":"day","legs":[…]}' | alpaca api POST /v2/orders
 ```
-This is how you place spreads through the CLI while still satisfying the CLI requirement. Verify it
-against your account before relying on it (`09-open-questions.md`).
+This is how you place spreads through the CLI while still satisfying the CLI requirement.
+
+✅ **Verified working 2026-09-01.** A two-leg vertical and a four-leg structure were both accepted
+(`status: accepted`, `order_class: mleg`, legs intact). The hybrid design below is viable as written.
+Note the CLI writes error JSON to **stderr**, so capture `2>&1` when parsing failures.
 
 ## SDKs
 

@@ -12,10 +12,23 @@ export ALPACA_API_KEY ALPACA_SECRET_KEY
 
 NEAR=SPY260918C00765000   # refresh these to live contracts before running
 FAR=SPY260918C00770000
-PUT_S=SPY260918P00755000
-PUT_L=SPY260918P00750000
+PUT_S=SPY260918P00755000   # higher strike - bought
+PUT_L=SPY260918P00750000   # lower strike - sold
 
-cleanup () { echo; echo "--- cancelling all open orders ---"; alpaca order cancel-all 2>&1 | head -5; alpaca order list --jq 'length'; }
+cleanup () {
+  echo; echo "--- cleanup: cancelling all open orders ---"
+  alpaca order cancel-all >/dev/null 2>&1
+  sleep 1
+  echo "  open orders remaining : $(alpaca order list --jq 'length' 2>&1)"
+  POS=$(alpaca position list --jq 'length' 2>&1)
+  echo "  positions             : $POS"
+  if [ "$POS" != "0" ]; then
+    echo "  !! UNEXPECTED POSITION OPENED -- closing it !!"
+    alpaca position close-all 2>&1 | head -5
+    echo "  positions after close : $(alpaca position list --jq 'length' 2>&1)"
+  fi
+  echo "  equity                : $(alpaca account get --jq '.equity' 2>&1)"
+}
 trap cleanup EXIT
 
 show () {
@@ -37,18 +50,27 @@ echo "===== Q2: MLEG limit via CLI raw passthrough ====="
 printf '%s' "{\"order_class\":\"mleg\",\"qty\":\"1\",\"type\":\"limit\",\"limit_price\":\"0.01\",\"time_in_force\":\"day\",
  \"legs\":[{\"symbol\":\"$NEAR\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
           {\"symbol\":\"$FAR\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"}]}" \
-  | alpaca api POST /v2/orders | show
+  | alpaca api POST /v2/orders 2>&1 | show
 
 echo "===== Q3: MLEG type=market ====="
 printf '%s' "{\"order_class\":\"mleg\",\"qty\":\"1\",\"type\":\"market\",\"time_in_force\":\"day\",
  \"legs\":[{\"symbol\":\"$NEAR\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
           {\"symbol\":\"$FAR\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"}]}" \
-  | alpaca api POST /v2/orders | show
+  | alpaca api POST /v2/orders 2>&1 | show
 
-echo "===== Q6: four-leg iron condor, ratio 1:1:1:1 ====="
+echo "===== Q6: four legs, ratio 1:1:1:1 (long call spread + long put spread) ====="
+# Deliberately a NET DEBIT structure (~$3.78) so a 0.01 limit is unfillable under
+# EITHER sign convention. A credit condor at 0.01 could fill at the open if the
+# limit means "accept at least 0.01 credit" -- do not test it that way.
 printf '%s' "{\"order_class\":\"mleg\",\"qty\":\"1\",\"type\":\"limit\",\"limit_price\":\"0.01\",\"time_in_force\":\"day\",
- \"legs\":[{\"symbol\":\"$FAR\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"},
-          {\"symbol\":\"$NEAR\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
-          {\"symbol\":\"$PUT_S\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"},
-          {\"symbol\":\"$PUT_L\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"}]}" \
-  | alpaca api POST /v2/orders | show
+ \"legs\":[{\"symbol\":\"$NEAR\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
+          {\"symbol\":\"$FAR\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"},
+          {\"symbol\":\"$PUT_S\",\"ratio_qty\":\"1\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
+          {\"symbol\":\"$PUT_L\",\"ratio_qty\":\"1\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"}]}" \
+  | alpaca api POST /v2/orders 2>&1 | show
+
+echo "===== Q6b: GCD violation -- ratio 2:2 must be REJECTED ====="
+printf '%s' "{\"order_class\":\"mleg\",\"qty\":\"1\",\"type\":\"limit\",\"limit_price\":\"0.01\",\"time_in_force\":\"day\",
+ \"legs\":[{\"symbol\":\"$NEAR\",\"ratio_qty\":\"2\",\"side\":\"buy\",\"position_intent\":\"buy_to_open\"},
+          {\"symbol\":\"$FAR\",\"ratio_qty\":\"2\",\"side\":\"sell\",\"position_intent\":\"sell_to_open\"}]}" \
+  | alpaca api POST /v2/orders 2>&1 | show

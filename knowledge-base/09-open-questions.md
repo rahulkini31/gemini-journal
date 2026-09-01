@@ -1,6 +1,6 @@
 # 09 — Open Questions
 
-> **Q1, Q4, Q5 and Q7 were resolved against the live account on 2026-09-01 —
+> **Q1–Q7 were all resolved against the live account on 2026-09-01 —
 > see [`10-verification-log.md`](10-verification-log.md).** The rest stand open.
 
 Everything here is **unverified**. Each item names the exact command or action that settles it.
@@ -22,7 +22,8 @@ alpaca account config get
 whole strategy family changes — fall back to Level 2 long calls/puts (still defined-risk, still
 options-compliant).
 
-### 2. Does `alpaca api POST /v2/orders` actually place an MLEG order?
+### 2. ✅ RESOLVED — YES
+`alpaca api POST /v2/orders` accepts `order_class: "mleg"`. Order returned `status: accepted`, both legs intact. **The CLI execution path works** — the hybrid architecture in `03-agent-surfaces.md` is viable as designed.
 The CLI has no documented first-class multi-leg submit command. `03-agent-surfaces.md` proposes the
 raw-passthrough route, which is how you satisfy the CLI requirement *and* trade spreads. **This is an
 assumption, not a documented fact.**
@@ -38,7 +39,8 @@ Use an unfillable limit price so the test cannot accidentally open a position, t
 **If it fails:** use `place_option_order` via MCP for execution and the CLI for data/monitoring —
 still satisfies the rule.
 
-### 3. Do MLEG orders accept `type: "market"`?
+### 3. ✅ RESOLVED — yes, but only during market hours
+Rejected outside RTH with `42210000: "options market orders are only allowed during market hours"`. That is a *market-hours* restriction, not an MLEG restriction — so market MLEG is supported inside 13:30–20:00 UTC. Re-confirm with a live-hours run.
 Every documented example is limit + day. If market MLEG works, entry logic simplifies enormously; if
 not, non-fill handling is mandatory. Test with a 1-contract wide spread on a liquid underlying.
 
@@ -60,7 +62,8 @@ Regime detection built on VIX is a common design. Index data may be a separate e
 alpaca api GET '/v1beta1/indices/latest?symbols=VIX' ; echo "exit=$?"
 ```
 
-### 6. Real `ratio_qty` behaviour for an iron condor
+### 6. ✅ RESOLVED — four legs accepted; GCD rule enforced
+1:1:1:1 across four legs accepted with correct `position_intent` on each. A 2:2 ratio was rejected with `"leg ratio quantities should be relatively prime: GCD[2 2] = 2"` — the documented rule, enforced with an explicit, parseable error.
 A condor is four legs. Confirm 1:1:1:1 is accepted and that the GCD rule behaves as documented for
 four legs, not just two. Also confirm which `position_intent` each leg needs.
 

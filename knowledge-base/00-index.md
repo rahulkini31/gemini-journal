@@ -108,9 +108,10 @@ trading history on the account ID you submit, and history only accumulates while
 All four account-related eligibility rules are satisfied. Full detail in
 [`10-verification-log.md`](10-verification-log.md).
 
-**Still unproven:** whether the CLI's raw passthrough actually places MLEG orders (Q2), whether MLEG
-accepts market orders (Q3), and four-leg condor mechanics (Q6). Each needs a test order on the
-judged account.
+**Q1–Q7 are now all resolved against the live account.** The CLI's raw passthrough *does* place MLEG
+orders, four-leg structures work, and market MLEG orders are allowed inside market hours. The
+architecture in `03-agent-surfaces.md` is verified end-to-end. Only the Discord questions (Q8–Q10)
+and minor items remain.
 
 ---
 
