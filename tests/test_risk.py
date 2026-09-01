@@ -490,3 +490,52 @@ class TestShortlistRanking(unittest.TestCase):
         self.assertNotEqual([c.net_debit for c in best_two],
                             [c.net_debit for c in globally_best],
                             "this test is meaningless if the families tie")
+
+
+class TestContextFreshness(unittest.TestCase):
+    """Regression: context built from daily bars alone describes YESTERDAY.
+
+    Measured live mid-session: bars reported SPY at range position 0.968, "near
+    its 20-day high", while spot was 762.02 - a true position of 0.672, down
+    1.84% on the day. The proposer reasoned about the wrong market and declined
+    on it.
+    """
+
+    @staticmethod
+    def bars(closes):
+        return [{"c": c} for c in closes]
+
+    def test_live_spot_overrides_stale_close(self):
+        from bookbound.context import price_context
+        closes = [730.0 + i for i in range(20)]        # 730..749, high 749
+        ctx = price_context(self.bars(closes), spot=735.0)
+        self.assertEqual(ctx["spot"], 735.0)
+        self.assertEqual(ctx["prev_close"], 749.0)
+        self.assertTrue(ctx["is_live_spot"])
+        self.assertAlmostEqual(ctx["change_today_pct"],
+                               round((735.0 / 749.0 - 1) * 100, 2))
+
+    def test_range_position_reflects_live_spot(self):
+        from bookbound.context import price_context
+        closes = [730.0 + i for i in range(20)]
+        stale = price_context(self.bars(closes))
+        live = price_context(self.bars(closes), spot=735.0)
+        self.assertGreater(stale["range_position"], 0.9,
+                           "bars alone put it at the top of the range")
+        self.assertLess(live["range_position"], 0.5,
+                        "live spot puts it in the lower half")
+
+    def test_falls_back_cleanly_without_spot(self):
+        from bookbound.context import price_context
+        ctx = price_context(self.bars([730.0 + i for i in range(20)]))
+        self.assertFalse(ctx["is_live_spot"])
+        self.assertIsNone(ctx["change_today_pct"])
+
+    def test_todays_move_enters_realised_vol(self):
+        from bookbound.context import price_context
+        closes = [700.0] * 20                          # flat: zero realised vol
+        flat = price_context(self.bars(closes))
+        shocked = price_context(self.bars(closes), spot=680.0)   # -2.9% today
+        self.assertAlmostEqual(flat["realised_vol_annualised"], 0.0, places=6)
+        self.assertGreater(shocked["realised_vol_annualised"], 0.0,
+                           "a live gap must raise realised vol")
