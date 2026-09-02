@@ -15,7 +15,7 @@ from .risk import evaluate, shrink_to_fit
 from .structures import (
     build_vertical_credit_spreads,
     build_vertical_debit_spreads,
-    risk_adjusted_ev,
+    quality_score,
 )
 
 
@@ -94,12 +94,23 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
 
     # --- construct (deterministic, before any model runs) -------------------
     loss_cap = book.equity * settings.risk.max_loss_per_trade_pct
+    # Realised vol per underlying feeds the EV integral. Without it the model
+    # falls back to implied vol, under which EV is by construction just the
+    # negative execution cost - no edge can ever be detected.
+    ctx = market_context.build(settings, spots)
+    realised_vols = {
+        sym: node.get("realised_vol_annualised") or 0.0
+        for sym, node in (ctx.get("underlyings") or {}).items()
+        if node.get("available")
+    }
     candidates = []
     for kind in ("C", "P"):
         candidates.extend(build_vertical_debit_spreads(
-            all_contracts, settings, kind=kind, max_loss_cap=loss_cap))
+            all_contracts, settings, kind=kind, max_loss_cap=loss_cap,
+            realised_vols=realised_vols))
         candidates.extend(build_vertical_credit_spreads(
-            all_contracts, settings, kind=kind, max_loss_cap=loss_cap))
+            all_contracts, settings, kind=kind, max_loss_cap=loss_cap,
+            realised_vols=realised_vols))
     # keep only structures that already pass the gates - the model never sees
     # anything the risk engine would refuse
     admissible = [
@@ -110,7 +121,7 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
     # concatenating four builders and slicing the front feeds the model whichever
     # family happens to be emitted first - which was every negative-EV bull call
     # spread, while the strongly positive bear put spreads never appeared.
-    admissible.sort(key=lambda c: -risk_adjusted_ev(c))
+    admissible.sort(key=lambda c: -quality_score(c))
     report.candidates = len(admissible)
 
     if not admissible:
@@ -130,7 +141,7 @@ def run_cycle(settings: Settings, *, dry_run: bool = True) -> CycleReport:
             "day_pnl_pct": round(book.day_pnl_pct, 4),
             "open_option_positions": health["option_positions"],
         },
-        **market_context.build(settings, spots),
+        **ctx,
     }
     decision = decide(admissible[:10], context, settings)
 

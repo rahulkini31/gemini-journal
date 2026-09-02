@@ -345,18 +345,41 @@ class TestCreditSignConvention(unittest.TestCase):
         self.assertAlmostEqual(s.max_loss, (s.width - credit) * 100, places=4)
         self.assertAlmostEqual(s.max_gain + s.max_loss, s.width * 100, places=4)
 
-    def test_credit_ev_uses_inverted_probabilities(self):
-        """A credit spread wins when the short expires worthless - the opposite
-        of the debit case. Getting this backwards would rank the worst trades
-        highest."""
-        from bookbound.structures import expected_value
+    def test_credit_ev_is_negative_when_iv_equals_rv(self):
+        """With no variance risk premium there is no edge, only cost.
+
+        These synthetic contracts carry iv == realised_vol, so the distribution
+        model must report roughly MINUS the execution cost. A positive number
+        here would mean the model is manufacturing edge from nothing - the exact
+        failure the old delta-based proxy was prone to.
+        """
+        from bookbound.structures import execution_cost, expected_value
         s = self.credit_spread()
-        # short delta 0.42 -> ~58% chance of keeping the credit
+        self.assertLess(expected_value(s), 0.0)
+        self.assertGreater(execution_cost(s), 0.0,
+                           "crossing the spread always costs something")
         self.assertGreater(expected_value(s), -s.max_loss,
-                           "EV must not collapse to max loss")
-        ev_terms = (1.0 - abs(s.short.delta)) * s.max_gain \
-            - abs(s.long.delta) * s.max_loss
-        self.assertAlmostEqual(expected_value(s), ev_terms, places=2)
+                           "cost must not exceed the whole position")
+
+    def test_credit_ev_turns_positive_when_vol_is_rich(self):
+        """The economically meaningful case: sell vol priced above realised.
+
+        Spot must be set explicitly and OTM. The fixture's default leaves spot
+        at the long strike, which puts it ABOVE the short strike - an already
+        in-the-money credit spread, where lower realised vol correctly HURTS the
+        seller because it locks in the loss. Getting that wrong once is what
+        this docstring is for.
+        """
+        import dataclasses
+
+        from bookbound.structures import expected_value
+        base = dataclasses.replace(self.credit_spread(), spot=760.0,
+                                   realised_vol=0.20)
+        calm = dataclasses.replace(base, realised_vol=0.08)
+        self.assertGreater(expected_value(calm), expected_value(base),
+                           "with spot OTM, a calmer world favours the seller")
+        self.assertGreater(expected_value(calm), 0.0,
+                           "selling vol at 0.20 that realises 0.08 should pay")
 
     def test_aggression_always_moves_price_against_us(self):
         """Asserted in economic terms, not raw sign.

@@ -12,6 +12,7 @@ from datetime import date
 from .book import CONTRACT_MULTIPLIER, Leg
 from .config import Settings
 from .market import Contract, tradeable
+from .pricing import EvBreakdown, implied_forward, spread_expected_value
 
 
 @dataclass(frozen=True)
@@ -30,11 +31,33 @@ class Structure:
                               # the sign never has to be flipped at the boundary.
     max_loss: float           # dollars, total for qty
     max_gain: float           # dollars, total for qty
+    spot: float = 0.0         # underlying at construction, for the EV integral
+    realised_vol: float = 0.0 # real-world vol assumption for the EV integral
+    forward: float = 0.0      # parity-implied forward for this expiry
     rationale: str = ""
 
     @property
     def is_credit(self) -> bool:
         return self.net_debit < 0
+
+    @property
+    def dte(self) -> int:
+        return (self.expiry - date.today()).days
+
+    def ev(self, net_debit: float | None = None) -> EvBreakdown:
+        """Full-distribution expected value at a given entry price."""
+        return spread_expected_value(
+            kind=self.long.kind,
+            long_strike=self.long.strike,
+            short_strike=self.short.strike,
+            net_debit=self.net_debit if net_debit is None else net_debit,
+            spot=self.spot or self.long.strike,
+            dte=self.dte,
+            market_mid_value=self.long.mid - self.short.mid,
+            realised_vol=self.realised_vol or self.long.iv,
+            forward=self.forward or None,
+            multiplier=CONTRACT_MULTIPLIER * self.qty,
+        )
 
     @property
     def width(self) -> float:
@@ -98,9 +121,12 @@ class Structure:
             "max_loss": round(self.max_loss, 2),
             "max_gain": round(self.max_gain, 2),
             "reward_risk": round(self.max_gain / self.max_loss, 2) if self.max_loss else 0,
-            "expected_value": round(expected_value(self), 2),
+            "expected_value_under_realised_vol": round(expected_value(self), 2),
             "ev_per_dollar_risked": round(risk_adjusted_ev(self), 4),
-            "fair_value_ev": round(fair_value_ev(self), 2),
+            "quality_score": round(quality_score(self), 4),
+            "execution_cost": round(execution_cost(self), 2),
+            "variance_premium": round(variance_premium(self), 2),
+            "probability_of_profit": round(probability_of_profit(self), 4),
             "execution_drag": round(execution_drag(self), 2),
             "long_delta": round(self.long.delta, 4),
             "short_delta": round(self.short.delta, 4),
@@ -108,6 +134,38 @@ class Structure:
             "short_iv": round(self.short.iv, 4),
             "rationale": self.rationale,
         }
+
+
+def forwards_by_series(contracts: list[Contract]) -> dict[tuple[str, date], float]:
+    """Parity-implied forward per (underlying, expiry).
+
+    Pricing options off raw spot with a guessed interest rate was measurably
+    wrong: SPY calls and puts were misvalued by up to a dollar in OPPOSITE
+    directions, which is the signature of a missing forward drift and which made
+    edge-versus-mid come out spuriously POSITIVE. The forward is observable, so
+    observe it rather than guessing its components.
+    """
+    calls: dict[tuple[str, date, float], float] = {}
+    puts: dict[tuple[str, date, float], float] = {}
+    for c in contracts:
+        target = calls if c.kind == "C" else puts
+        target[(c.underlying, c.expiry, c.strike)] = c.mid
+
+    grouped: dict[tuple[str, date], list[tuple[float, float, float]]] = {}
+    for (underlying, expiry, strike), call_mid in calls.items():
+        put_mid = puts.get((underlying, expiry, strike))
+        if put_mid is None:
+            continue
+        grouped.setdefault((underlying, expiry), []).append(
+            (strike, call_mid, put_mid)
+        )
+
+    out: dict[tuple[str, date], float] = {}
+    for series, pairs in grouped.items():
+        fwd = implied_forward(pairs)
+        if fwd:
+            out[series] = fwd
+    return out
 
 
 def build_vertical_debit_spreads(
@@ -119,6 +177,7 @@ def build_vertical_debit_spreads(
     max_candidates: int = 12,
     spot: float | None = None,
     max_loss_cap: float | None = None,
+    realised_vols: dict[str, float] | None = None,
 ) -> list[Structure]:
     """Construct defined-risk vertical DEBIT spreads.
 
@@ -131,6 +190,7 @@ def build_vertical_debit_spreads(
     ``kind`` "C" builds bull call spreads, "P" builds bear put spreads.
     """
     budget = settings.risk
+    forwards = forwards_by_series(contracts)
     usable = [
         c for c in contracts
         if c.kind == kind and tradeable(c, settings)
@@ -161,7 +221,10 @@ def build_vertical_debit_spreads(
             reference = spot or anchor.strike
             if abs(anchor.strike - short.strike) > reference * budget.max_width_pct_of_spot:
                 continue
-            structure = _price_debit_spread(anchor, short, kind, expiry)
+            structure = _price_debit_spread(
+                anchor, short, kind, expiry, spot=spot,
+                realised_vol=(realised_vols or {}).get(anchor.underlying, 0.0),
+                forward=forwards.get((anchor.underlying, expiry), 0.0))
             if structure is not None:
                 candidates.append(structure)
 
@@ -173,36 +236,56 @@ def build_vertical_debit_spreads(
     if max_loss_cap is not None:
         candidates = [c for c in candidates if c.max_loss <= max_loss_cap]
 
-    candidates.sort(key=lambda s: -risk_adjusted_ev(s))
+    candidates.sort(key=lambda s: -quality_score(s))
     return candidates[:max_candidates]
 
 
-def expected_value_at(structure: Structure, net_debit: float) -> float:
-    """Delta-weighted EV proxy for a given entry price, in dollars.
+def expected_value(structure: Structure) -> float:
+    """Expected value in dollars under the REALISED-vol distribution.
 
-    Delta approximates the risk-neutral probability of finishing ITM.
-
-    DEBIT spread (we buy the near strike, sell the far one):
-        max gain needs spot beyond the SHORT strike  -> p ~ |short delta|
-        max loss needs spot below the LONG strike    -> p ~ 1 - |long delta|
-
-    CREDIT spread (we sell the near strike, buy the far one):
-        max gain needs the SHORT to expire worthless -> p ~ 1 - |short delta|
-        max loss needs spot beyond the LONG strike   -> p ~ |long delta|
+    This is the real-world claim: what the structure is worth if the underlying
+    behaves like its recent realised volatility rather than like the implied
+    surface. It integrates the entire piecewise-linear payoff, not just the two
+    extremes.
     """
-    scale = CONTRACT_MULTIPLIER * structure.qty
-    if net_debit < 0:                       # credit
-        credit = -net_debit
-        max_gain = credit * scale
-        max_loss = (structure.width - credit) * scale
-        p_max_gain = 1.0 - abs(structure.short.delta)
-        p_max_loss = abs(structure.long.delta)
-    else:                                   # debit
-        max_gain = (structure.width - net_debit) * scale
-        max_loss = net_debit * scale
-        p_max_gain = abs(structure.short.delta)
-        p_max_loss = 1.0 - abs(structure.long.delta)
-    return p_max_gain * max_gain - p_max_loss * max_loss
+    result = structure.ev()
+    return result.ev_under_rv if result.valid else 0.0
+
+
+def execution_cost(structure: Structure) -> float:
+    """What crossing the spread costs us, in dollars. OBSERVED, not modelled.
+
+    This used to be derived from Black-Scholes at the vendor's per-leg implied
+    vols, which was both unnecessary and wrong: the vendor's IVs violate
+    put-call parity by a uniform 1.6 vol points, so the "model" invented edge.
+
+    Our execution price and the quoted mid are both directly observable, so
+    subtract them. No model can improve on that, and none can corrupt it.
+    """
+    mid_debit = structure.long.mid - structure.short.mid
+    return abs(structure.net_debit - mid_debit) * CONTRACT_MULTIPLIER * structure.qty
+
+
+def variance_premium(structure: Structure) -> float:
+    """Modelled value under realised vol MINUS the observed market mid.
+
+    ⚠️ THIS IS NOT AN EDGE MEASURE AND MUST NOT BE RANKED ON.
+
+    It is contaminated by skew, and the contamination has a fixed sign. A
+    single-vol lognormal cannot reproduce a skewed market: for a put DEBIT
+    spread the market prices the lower-strike short leg relatively richer than
+    any flat-vol model will, so the model always values the structure ABOVE the
+    market. Measured live, every SPY put debit spread showed a large positive
+    "premium" while SPY put IV (14.5%) was in fact ABOVE realised vol (13.2%) -
+    a genuine vol premium would have had the opposite sign.
+
+    Separating skew from a true vol premium needs a smile-aware model compared
+    against a real-world distribution carrying the same skew. That is out of
+    scope here, so this number is reported for transparency and used for
+    nothing.
+    """
+    result = structure.ev()
+    return result.variance_premium if result.valid else 0.0
 
 
 def build_vertical_credit_spreads(
@@ -213,6 +296,7 @@ def build_vertical_credit_spreads(
     max_candidates: int = 12,
     spot: float | None = None,
     max_loss_cap: float | None = None,
+    realised_vols: dict[str, float] | None = None,
 ) -> list[Structure]:
     """Construct defined-risk vertical CREDIT spreads.
 
@@ -221,6 +305,7 @@ def build_vertical_credit_spreads(
     exactly at entry.
     """
     budget = settings.risk
+    forwards = forwards_by_series(contracts)
     usable = [c for c in contracts if c.kind == kind and tradeable(c, settings)]
     if len(usable) < 2:
         return []
@@ -244,7 +329,10 @@ def build_vertical_credit_spreads(
             reference = spot or anchor.strike
             if abs(anchor.strike - long.strike) > reference * budget.max_width_pct_of_spot:
                 continue
-            structure = _price_credit_spread(long, anchor, kind, expiry)
+            structure = _price_credit_spread(
+                long, anchor, kind, expiry, spot=spot,
+                realised_vol=(realised_vols or {}).get(anchor.underlying, 0.0),
+                forward=forwards.get((anchor.underlying, expiry), 0.0))
             if structure is not None:
                 candidates.append(structure)
 
@@ -256,12 +344,13 @@ def build_vertical_credit_spreads(
     if max_loss_cap is not None:
         candidates = [c for c in candidates if c.max_loss <= max_loss_cap]
 
-    candidates.sort(key=lambda s: -risk_adjusted_ev(s))
+    candidates.sort(key=lambda s: -quality_score(s))
     return candidates[:max_candidates]
 
 
 def _price_credit_spread(
-    long: Contract, short: Contract, kind: str, expiry: date
+    long: Contract, short: Contract, kind: str, expiry: date,
+    *, spot: float = 0.0, realised_vol: float = 0.0, forward: float = 0.0,
 ) -> Structure | None:
     """Price a credit vertical from real quotes. Returns None if not viable."""
     if long.underlying != short.underlying or long.expiry != short.expiry \
@@ -290,6 +379,9 @@ def _price_credit_spread(
         net_debit=-credit,                # NEGATIVE: Alpaca's credit convention
         max_loss=(width - credit) * CONTRACT_MULTIPLIER,
         max_gain=credit * CONTRACT_MULTIPLIER,
+        spot=spot or long.strike,
+        realised_vol=realised_vol or long.iv,
+        forward=forward,
         rationale=(
             f"{direction} {width:.0f}-wide credit vertical, "
             f"collect {credit:.2f}, risk {width - credit:.2f}"
@@ -297,56 +389,59 @@ def _price_credit_spread(
     )
 
 
-def risk_adjusted_ev(structure: Structure) -> float:
-    """Expected value per dollar of capital at risk.
+def probability_of_profit(structure: Structure) -> float:
+    result = structure.ev()
+    return result.probability_of_profit if result.valid else 0.0
 
-    Ranking on ABSOLUTE expected value is a trap. A wide, high-notional spread
-    always shows a bigger EV than a narrow one, so sorting by it and truncating
-    the shortlist crowded out every candidate small enough to pass the per-trade
-    loss cap - the builder produced 24 credit spreads and the risk engine refused
-    all 24 for exceeding it.
 
-    Normalising by max loss ranks capital efficiency instead, which is both the
-    economically meaningful comparison and the one that keeps admissible
-    candidates on the shortlist.
+def quality_score(structure: Structure) -> float:
+    """Ranking score built ONLY from quantities we can defend.
+
+    Three failed attempts preceded this one, and the pattern in all three was
+    the same - ranking on a number that looked like edge and was not:
+
+      1. Reward/risk: always picked the widest spread with the most worthless
+         short leg, i.e. a long option wearing a costume.
+      2. Delta-weighted EV: delta IS the risk-neutral probability, so measuring
+         market prices against it returns ~zero by construction. Any positive
+         value was an artifact of a two-point approximation that discarded
+         4.6%-10.9% of the probability mass.
+      3. Variance premium: dominated by skew, with a fixed sign per structure
+         type. See ``variance_premium``.
+
+    So this deliberately makes NO alpha claim. It ranks on execution quality and
+    payoff shape, both of which are either observed or robust:
+
+      * execution cost as a fraction of capital at risk - observed from quotes,
+        no model, and lower is unambiguously better;
+      * probability of profit under realised vol - a model number, but one that
+        depends on the payoff geometry rather than on a mispricing claim.
+
+    Selection here is a filter for tradeable structures, not a forecast.
     """
+    if structure.max_loss <= 0:
+        return 0.0
+    friction = execution_cost(structure) / structure.max_loss
+    return probability_of_profit(structure) - friction
+
+
+def risk_adjusted_ev(structure: Structure) -> float:
+    """Retained for reporting. Ranking uses ``quality_score``."""
     if structure.max_loss <= 0:
         return 0.0
     return expected_value(structure) / structure.max_loss
 
 
 def fair_value_ev(structure: Structure) -> float:
-    """EV if we could transact at the midpoint of both legs.
-
-    On an efficient market this lands near zero. What matters is not its level
-    but the gap between it and the EV at the price we can actually pay - that
-    gap is the execution cost the indicative feed imposes on us.
-    """
+    """EV under realised vol if we could transact at the midpoint of both legs."""
     mid_debit = structure.long.mid - structure.short.mid
-    return expected_value_at(structure, mid_debit)
+    result = structure.ev(net_debit=mid_debit)
+    return result.ev_under_rv if result.valid else 0.0
 
 
 def execution_drag(structure: Structure) -> float:
-    """Dollars of expected value surrendered to the bid-ask spread.
-
-    Positive means crossing the spread costs us. This is the number the free
-    INDICATIVE feed makes large, and the reason most candidates should be
-    refused rather than traded.
-    """
+    """Expected value surrendered to the bid-ask spread. Same units as EV."""
     return fair_value_ev(structure) - expected_value(structure)
-
-
-def expected_value(structure: Structure) -> float:
-    """Delta-weighted EV proxy, in dollars.
-
-    Option delta approximates the risk-neutral probability of finishing ITM, so:
-      P(reach max gain) ~ |short delta|   (spot beyond the short strike)
-      P(total loss)     ~ 1 - |long delta| (spot below the long strike)
-
-    This is a ranking heuristic on top of INDICATIVE-feed greeks, not a pricing
-    model. It exists to stop reward/risk from always winning.
-    """
-    return expected_value_at(structure, structure.net_debit)
 
 
 def _is_valid_credit_pair(long: Contract, short: Contract, kind: str) -> bool:
@@ -381,7 +476,8 @@ def _is_valid_pair(long: Contract, short: Contract, kind: str) -> bool:
 
 
 def _price_debit_spread(
-    long: Contract, short: Contract, kind: str, expiry: date
+    long: Contract, short: Contract, kind: str, expiry: date,
+    *, spot: float = 0.0, realised_vol: float = 0.0, forward: float = 0.0,
 ) -> Structure | None:
     """Price a debit vertical from real quotes. Returns None if not viable."""
     if long.underlying != short.underlying or long.expiry != short.expiry \
