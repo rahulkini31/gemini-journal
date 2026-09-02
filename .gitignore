@@ -31,3 +31,4 @@ logs/
 .vscode/
 .idea/
 state/
+.claude/worktrees/
