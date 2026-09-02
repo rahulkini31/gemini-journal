@@ -18,7 +18,7 @@ from . import execute
 from .audit import AuditLog
 from .config import Settings
 from .cycle import run_cycle
-from .exits import deadline_flatten
+from .exits import flatten_structure_plans
 from .http import ApiError
 from .market import market_clock
 
@@ -184,18 +184,24 @@ def _flatten(settings: Settings, audit: AuditLog, live: bool) -> bool:
     print("\n=== pre-deadline flatten ===")
     try:
         book = load_book(settings, {})
-        orders = deadline_flatten(book.raw_positions, "pre-deadline flatten")
-        if not orders:
+        plans = flatten_structure_plans(
+            book.raw_positions, "pre-deadline flatten"
+        )
+        if not plans:
             audit.write("flatten", result="nothing open")
             print("nothing open")
             return True
-        for order in orders:
-            result = execute.close_position(order, dry_run=not live)
-            audit.write("flatten", symbol=order.symbol, status=result.status,
-                        ok=result.ok, error=result.error, dry_run=not live)
-            print(f"  close {order.symbol}: {result.status}")
+        for plan in plans:
+            result = execute.close_structure(
+                plan, dry_run=not live, settings=settings
+            )
+            audit.write(
+                "flatten", symbols=list(plan.symbols), status=result.status,
+                ok=result.ok, error=result.error, dry_run=not live,
+            )
+            print(f"  close {','.join(plan.symbols)}: {result.status}")
         if live:
-            execute.cancel_all()
+            execute.cancel_all(settings)
         return True
     except Exception as exc:  # noqa: BLE001
         audit.write("error", where="flatten", error=str(exc)[:300])
@@ -214,7 +220,8 @@ def _print_cycle(number: int, report) -> None:
         f"cand {report.candidates:>2}"
     )
     for exit_record in report.exits or []:
-        print(f"            exit {exit_record['symbol']} "
+        symbols = exit_record.get("symbols") or [exit_record.get("symbol", "unknown")]
+        print(f"            exit {','.join(symbols)} "
               f"({exit_record['reason']}: {exit_record['detail']})")
     if report.detail:
         print(f"            {report.detail[:150]}")

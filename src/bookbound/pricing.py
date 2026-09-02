@@ -1,4 +1,4 @@
-"""Expected value of a vertical spread under an explicit distribution.
+"""Terminal-expiry scenarios for a vertical under an explicit distribution.
 
 Replaces a two-point approximation that used delta as the probability of
 finishing ITM. That model had two defects:
@@ -33,9 +33,11 @@ distribution, and to be explicit about WHICH distribution:
   The lesson generalises: model only what cannot be observed. The mid is
   observable, so observe it.
 
-* Under realised vol, the expectation is a real-world claim. The gap between
-  the two is the variance risk premium, which is the only place a genuine edge
-  in this strategy can live.
+* The realised-vol calculation is a physical-measure *proxy*, not a calibrated
+  forecast.  It describes terminal payoff under one declared lognormal
+  scenario.  It does not model the desk's early-exit policy, assignment, jumps,
+  skew dynamics, or transaction costs after entry, so it must not be presented
+  as the strategy's true expectancy or win probability.
 
 Both are exact closed forms, not simulations: the payoff of a vertical is a
 difference of two European options, and the undiscounted expectation of each is
@@ -114,8 +116,13 @@ def _leg_expectation(kind: str, forward, strike, sigma, t, rate=0.0) -> float:
 
 
 @dataclass(frozen=True)
-class EvBreakdown:
-    """Expected value of one spread, per contract-multiplier unit."""
+class TerminalScenario:
+    """One uncalibrated, policy-unaware terminal-expiry payoff scenario.
+
+    The historical field names remain for source compatibility.  New callers
+    should use the horizon-specific nullable properties below: invalid model
+    output is unavailable (``None``), not an economic zero.
+    """
 
     ev_at_market: float         # $ - OBSERVED: quoted mid minus our price
     ev_under_rv: float          # $ - MODELLED: realised-vol expectation minus our price
@@ -125,9 +132,29 @@ class EvBreakdown:
     probability_of_profit: float
     breakeven: float
     valid: bool
+    measure: str = "physical_proxy_lognormal"
+    horizon: str = "expiry"
+    calibrated: bool = False
+    policy_aware: bool = False
+
+    @property
+    def expected_pnl_at_expiry(self) -> float | None:
+        return self.ev_under_rv if self.valid else None
+
+    @property
+    def profit_probability_at_expiry(self) -> float | None:
+        return self.probability_of_profit if self.valid else None
+
+    @property
+    def breakeven_at_expiry(self) -> float | None:
+        return self.breakeven if self.valid else None
 
 
-def spread_expected_value(
+# Compatibility name for integrations that imported the original type.
+EvBreakdown = TerminalScenario
+
+
+def spread_terminal_scenario(
     *,
     kind: str,
     long_strike: float,
@@ -140,8 +167,8 @@ def spread_expected_value(
     rate: float = 0.0,
     forward: float | None = None,
     multiplier: int = 100,
-) -> EvBreakdown:
-    """Integrate the full payoff of a vertical against a lognormal.
+) -> TerminalScenario:
+    """Integrate terminal payoff against an uncalibrated lognormal proxy.
 
     Payoff at expiry, valid for calls and puts, debit and credit alike:
 
@@ -153,7 +180,9 @@ def spread_expected_value(
     """
     t = max(dte, 0) / TRADING_DAYS
     if t <= 0 or spot <= 0 or realised_vol <= 0:
-        return EvBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, valid=False)
+        return TerminalScenario(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, valid=False
+        )
     # Without an observed forward, fall back to spot with whatever drift the
     # caller supplied. That fallback is measurably biased - pricing SPY options
     # at r=0 misvalued calls and puts by up to a dollar in OPPOSITE directions -
@@ -179,7 +208,7 @@ def spread_expected_value(
         kind, long_strike, short_strike, breakeven, fwd, realised_vol, t, rate
     )
 
-    return EvBreakdown(
+    return TerminalScenario(
         ev_at_market=ev_market,
         ev_under_rv=ev_rv,
         variance_premium=ev_rv - ev_market,
@@ -189,6 +218,15 @@ def spread_expected_value(
         breakeven=breakeven,
         valid=True,
     )
+
+
+def spread_expected_value(**kwargs) -> TerminalScenario:
+    """Compatibility wrapper for :func:`spread_terminal_scenario`.
+
+    The old name is intentionally not used by shortlist or risk code because it
+    omits both the terminal horizon and the scenario's calibration limitations.
+    """
+    return spread_terminal_scenario(**kwargs)
 
 
 def payoff(kind: str, long_strike: float, short_strike: float,

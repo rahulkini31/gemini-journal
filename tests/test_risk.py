@@ -29,16 +29,20 @@ def contract(symbol, strike, kind="C", delta=0.5, bid=1.00, ask=1.10,
                     theta=theta, vega=vega, iv=iv)
 
 
-def book(equity=100_000.0, legs=None, positions=None, last_equity=None):
+def book(equity=100_000.0, legs=None, positions=None, last_equity=None, spots=None):
     return Book(equity=equity, last_equity=last_equity or equity, cash=equity,
                 buying_power=equity * 4, options_buying_power=equity,
-                legs=legs or [], raw_positions=positions or [])
+                legs=legs or [], raw_positions=positions or [],
+                spots=spots or {"SPY": 762.0})
 
 
 def spread(long_delta=0.55, short_delta=0.35, width=5.0, debit=2.0):
     long = contract("SPY_L", 760, delta=long_delta, bid=debit + 3.0, ask=debit + 3.1)
     short = contract("SPY_S", 760 + width, delta=short_delta, bid=3.1, ask=3.2)
-    built = _price_debit_spread(long, short, "C", EXPIRY)
+    built = _price_debit_spread(
+        long, short, "C", EXPIRY,
+        spot=762.0, realised_vol=0.20, forward=762.0,
+    )
     assert built is not None
     return built
 
@@ -96,7 +100,13 @@ class TestPortfolioGates(unittest.TestCase):
         self.assertGreater(admitted, 0, "should admit at least one")
         self.assertLess(admitted, 20, "must refuse before the book runs away")
         self.assertTrue(
-            any("book_delta" in r or "total_open_risk" in r for r in last_reasons),
+            any(
+                name in r
+                for r in last_reasons
+                for name in (
+                    "book_delta", "total_open_risk", "correlated_greek_stress"
+                )
+            ),
             f"a PORTFOLIO gate must be what stops it, got: {last_reasons}",
         )
 
@@ -193,11 +203,11 @@ class TestReconciliation(unittest.TestCase):
         self.assertEqual(len(breaches), 1)
         self.assertEqual(breaches[0].severity, "naked_short")
 
-    def test_partial_fill_leaving_lone_long_is_not_urgent(self):
+    def test_partial_fill_leaving_lone_long_is_unmanaged(self):
         from bookbound.reconcile import find_breaches
-        # a lone long is defined-risk; it is not a naked short
+        # A lone long is bounded but not attached to an executable exit unit.
         breaches = find_breaches([self.pos("SPY260918C00760000", 1)])
-        self.assertEqual([b.severity for b in breaches], [])
+        self.assertEqual([b.severity for b in breaches], ["unmanaged"])
 
     def test_unbalanced_ratio_is_flagged(self):
         from bookbound.reconcile import find_breaches
@@ -314,7 +324,10 @@ class TestCreditSignConvention(unittest.TestCase):
         from bookbound.structures import _price_credit_spread
         short = contract("SHORT", 770.0, delta=0.42, bid=6.49, ask=6.66)
         long = contract("LONG", 775.0, delta=0.33, bid=4.30, ask=4.33)
-        built = _price_credit_spread(long, short, "C", EXPIRY)
+        built = _price_credit_spread(
+            long, short, "C", EXPIRY,
+            spot=762.0, realised_vol=0.20, forward=762.0,
+        )
         assert built is not None
         return built
 
@@ -345,21 +358,22 @@ class TestCreditSignConvention(unittest.TestCase):
         self.assertAlmostEqual(s.max_loss, (s.width - credit) * 100, places=4)
         self.assertAlmostEqual(s.max_gain + s.max_loss, s.width * 100, places=4)
 
-    def test_credit_ev_is_negative_when_iv_equals_rv(self):
-        """With no variance risk premium there is no edge, only cost.
+    def test_crossing_the_credit_quote_reduces_model_ev(self):
+        """Execution friction must reduce EV regardless of a synthetic quote's IV.
 
-        These synthetic contracts carry iv == realised_vol, so the distribution
-        model must report roughly MINUS the execution cost. A positive number
-        here would mean the model is manufacturing edge from nothing - the exact
-        failure the old delta-based proxy was prone to.
+        Equal per-leg IV does not make arbitrary synthetic bid/ask prices a
+        no-arbitrage fair-value surface, so its EV sign is not a valid invariant.
+        The robust invariant is that crossing the quote is worse than transacting
+        at its midpoint by exactly the observed execution cost.
         """
-        from bookbound.structures import execution_cost, expected_value
+        from bookbound.structures import execution_cost, expected_value, fair_value_ev
         s = self.credit_spread()
-        self.assertLess(expected_value(s), 0.0)
         self.assertGreater(execution_cost(s), 0.0,
                            "crossing the spread always costs something")
-        self.assertGreater(expected_value(s), -s.max_loss,
-                           "cost must not exceed the whole position")
+        self.assertLess(expected_value(s), fair_value_ev(s))
+        self.assertAlmostEqual(
+            fair_value_ev(s) - expected_value(s), execution_cost(s), places=6,
+        )
 
     def test_credit_ev_turns_positive_when_vol_is_rich(self):
         """The economically meaningful case: sell vol priced above realised.
@@ -455,8 +469,8 @@ class TestRiskAdjustedRanking(unittest.TestCase):
         for width in range(1, 40):
             pool.append(Contract(
                 symbol=f"SPY_L{width}", underlying="SPY", expiry=EXPIRY, kind="C",
-                strike=770.0 + width, bid=max(6.4 - width * 0.16, 0.06),
-                ask=max(6.5 - width * 0.16, 0.08),
+                strike=770.0 + width, bid=max(6.4 - width * 0.25, 0.06),
+                ask=max(6.5 - width * 0.25, 0.08),
                 delta=max(0.24 - width * 0.006, 0.01), gamma=0.02, theta=-0.4,
                 vega=0.1, iv=0.2))
         cap = 100_000.0 * SETTINGS.risk.max_loss_per_trade_pct
@@ -570,16 +584,25 @@ class TestExpectancyGate(unittest.TestCase):
     not an edge when the loss is six times the gain."""
 
     def test_rejects_high_pop_negative_expectancy(self):
+        import dataclasses
         from bookbound.structures import _price_credit_spread, expected_value
         # sell the 746 put, buy the 735 put: 11 wide, ~1.5 credit
         short = contract("S", 746.0, kind="P", delta=-0.21, bid=3.00, ask=3.10)
         long = contract("L", 735.0, kind="P", delta=-0.10, bid=1.45, ask=1.50)
-        built = _price_credit_spread(long, short, "P", EXPIRY,
-                                     spot=762.0, realised_vol=0.1324)
+        built = _price_credit_spread(
+            long, short, "P", EXPIRY,
+            spot=762.0, realised_vol=0.1324, forward=762.0,
+        )
         self.assertIsNotNone(built)
         self.assertLess(expected_value(built), 0.0,
                         "this structure must be negative expectancy")
-        verdict = evaluate(built, book(), SETTINGS)
+        strict = dataclasses.replace(
+            SETTINGS,
+            risk=dataclasses.replace(
+                SETTINGS.risk, require_positive_expectancy=True,
+            ),
+        )
+        verdict = evaluate(built, book(), strict)
         self.assertFalse(verdict.admitted)
         self.assertTrue(any("positive_expectancy" in r for r in verdict.reasons),
                         verdict.reasons)
@@ -623,3 +646,50 @@ class TestSummaryContract(unittest.TestCase):
         self.assertIn(decision.outcome, {"LLM_ERROR", "VETOED", "SELECTED"})
         self.assertNotEqual(decision.outcome, "NO_TRADE")
         json.dumps(decision.proposer)
+
+
+class TestPricingInputsReachTheStructure(unittest.TestCase):
+    """Regression: the debit pricer accepted spot/realised_vol/forward and
+    passed NONE of them to Structure, so every debit spread was silently priced
+    at forward = its own long strike and sigma = its own long-leg implied vol,
+    while credit spreads used the parity forward and realised vol. The shortlist
+    was ranking two different probability distributions on one scale."""
+
+    def _built(self, pricer):
+        """Prices must make each family viable: a debit spread needs
+        long.ask > short.bid, a credit spread needs short.bid > long.ask."""
+        from bookbound.structures import _price_credit_spread, _price_debit_spread
+        if pricer == "debit":                       # bull call 760/765
+            long = contract("L", 760.0, delta=0.45, bid=8.00, ask=8.10)
+            short = contract("S", 765.0, delta=0.25, bid=5.50, ask=5.60)
+            fn, args = _price_debit_spread, (long, short)
+        else:                                       # bear call: sell 760, buy 765
+            short = contract("S", 760.0, delta=0.45, bid=8.00, ask=8.10)
+            long = contract("L", 765.0, delta=0.25, bid=5.50, ask=5.60)
+            fn, args = _price_credit_spread, (long, short)
+        built = fn(*args, "C", EXPIRY, spot=762.0, realised_vol=0.1324,
+                   forward=762.5)
+        self.assertIsNotNone(built, f"{pricer} fixture did not price")
+        return built
+
+    def test_debit_pricer_propagates_all_three(self):
+        built = self._built("debit")
+        self.assertEqual(built.spot, 762.0)
+        self.assertAlmostEqual(built.realised_vol, 0.1324)
+        self.assertEqual(built.forward, 762.5)
+
+    def test_credit_pricer_propagates_all_three(self):
+        built = self._built("credit")
+        self.assertEqual(built.spot, 762.0)
+        self.assertAlmostEqual(built.realised_vol, 0.1324)
+        self.assertEqual(built.forward, 762.5)
+
+    def test_both_families_price_off_the_same_distribution(self):
+        """The defect's real consequence: debit and credit must be comparable."""
+        debit = self._built("debit")
+        credit = self._built("credit")
+        for built in (debit, credit):
+            self.assertNotEqual(built.forward, built.long.strike,
+                                "forward must not fall back to the long strike")
+            self.assertNotAlmostEqual(built.realised_vol, built.long.iv,
+                                      msg="sigma must not fall back to long-leg IV")

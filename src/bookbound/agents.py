@@ -33,7 +33,9 @@ Hard rules:
   or a headline.
 - Compare implied vol to realised vol. IV well above RV favours SELLING premium
   (credit structures); IV below RV favours BUYING it (debit structures).
-- If you pass over a candidate with a better expected value, say why.
+- `terminal_expiry_scenario` is uncalibrated and not policy-aware. Do
+  not call it true expectancy or win probability, and do not prefer a trade
+  because of it unless BOTH `calibrated` and `policy_aware` are true.
 
 Reply with JSON only:
 {"choice": "<key from the shortlist or NO_TRADE>",
@@ -54,6 +56,10 @@ if the reasoning is generic, the reward/risk is poor, the quotes are wide, the
 implied vol relationship contradicts the thesis, or the thesis would apply
 equally to any other candidate.
 
+The `terminal_expiry_scenario` is not true expectancy or win probability unless
+it explicitly says BOTH `calibrated: true` and `policy_aware: true`. Do not use
+an uncalibrated or not-policy-aware terminal scenario as evidence of edge.
+
 Reply with JSON only:
 {"verdict": "APPROVE" | "REJECT",
  "reason": "<=240 chars, the specific objection or the specific support>"}"""
@@ -72,9 +78,28 @@ class Decision:
         return self.outcome == "SELECTED" and self.structure is not None
 
 
+_AMBIGUOUS_LEGACY_MODEL_FIELDS = frozenset({
+    "expected_value_under_realised_vol",
+    "ev_per_dollar_risked",
+    "variance_premium",
+    "probability_of_profit",
+    "execution_drag",
+    "ev_model",
+})
+
+
+def _agent_summary(candidate: Structure) -> dict:
+    """Expose only the explicitly scoped form of model-derived metrics."""
+    return {
+        key: value
+        for key, value in candidate.summary().items()
+        if key not in _AMBIGUOUS_LEGACY_MODEL_FIELDS
+    }
+
+
 def _shortlist_payload(candidates: list[Structure], context: dict) -> str:
     return json.dumps(
-        {"context": context, "shortlist": [c.summary() for c in candidates]},
+        {"context": context, "shortlist": [_agent_summary(c) for c in candidates]},
         indent=2,
         default=str,
     )
@@ -116,7 +141,7 @@ def decide(
     review_payload = json.dumps(
         {
             "context": context,
-            "proposed_trade": picked.summary(),
+            "proposed_trade": _agent_summary(picked),
             "analyst_thesis": proposal.get("thesis", ""),
             "analyst_confidence": proposal.get("confidence"),
             "rejected_alternatives": [
@@ -124,8 +149,8 @@ def decide(
                 # whole cycle here once, on the only path that runs when the
                 # proposer actually picks something.
                 {"key": c.key,
-                 "expected_value": c.summary().get(
-                     "expected_value_under_realised_vol"),
+                 "terminal_expiry_scenario": c.summary().get(
+                     "terminal_expiry_scenario"),
                  "quality_score": c.summary().get("quality_score")}
                 for c in candidates[:6] if c.key != picked.key
             ],

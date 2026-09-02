@@ -12,22 +12,86 @@ and current headlines. All from the free tier.
 from __future__ import annotations
 
 import statistics
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from .config import DATA_HOST, Settings
 from .http import ApiError, get_json
 
 
-def daily_bars(settings: Settings, symbol: str, days: int = 30) -> list[dict]:
+EXCHANGE_TIMEZONE = ZoneInfo("America/New_York")
+
+
+def exchange_date(as_of: date | datetime | None = None) -> date:
+    """Return the New York trading date for an explicit point in time.
+
+    The process currently runs in Asia/Kolkata, whose calendar advances while
+    the US session is still open.  Reading ``date.today()`` there can therefore
+    shift every DTE bound by one day.  Naive datetimes are rejected because
+    silently guessing their timezone would recreate the same ambiguity.
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of datetime must be timezone-aware")
+        return as_of.astimezone(EXCHANGE_TIMEZONE).date()
+    if isinstance(as_of, date):
+        return as_of
+    raise TypeError("as_of must be a date, datetime, or None")
+
+
+def _as_of_instant(as_of: date | datetime | None) -> datetime:
+    """Normalize an as-of value for APIs that require a timestamp."""
+    if as_of is None:
+        return datetime.now(timezone.utc)
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of datetime must be timezone-aware")
+        return as_of.astimezone(timezone.utc)
+    if isinstance(as_of, date):
+        # A date denotes the complete exchange day, not midnight at the start
+        # of that day.  Convert its final instant to UTC for the market API.
+        return datetime.combine(as_of, time.max, EXCHANGE_TIMEZONE).astimezone(
+            timezone.utc
+        )
+    raise TypeError("as_of must be a date, datetime, or None")
+
+
+def daily_bars(
+    settings: Settings,
+    symbol: str,
+    days: int = 30,
+    *,
+    as_of: date | datetime | None = None,
+) -> list[dict]:
     """Recent daily bars from IEX. The free plan withholds the last 15 minutes,
-    which is irrelevant for daily bars used as trend context."""
-    start = (date.today() - timedelta(days=days * 2)).isoformat()
+    which is irrelevant for daily bars used as trend context.
+
+    Alpaca defaults to ascending order, so ``limit=days`` used to select the
+    *oldest* rows after ``start``.  Request descending data to cap from the
+    newest end, then restore chronological order for return calculations.
+    """
+    if days <= 0:
+        return []
+    instant = _as_of_instant(as_of)
+    trading_date = exchange_date(instant)
+    start = (trading_date - timedelta(days=days * 2)).isoformat()
     payload = get_json(
         f"{DATA_HOST}/v2/stocks/{symbol}/bars",
         settings.auth_headers,
-        {"timeframe": "1Day", "start": start, "limit": days, "feed": "iex"},
+        {
+            "timeframe": "1Day",
+            "start": start,
+            "end": instant.isoformat(),
+            "limit": days,
+            "feed": "iex",
+            "sort": "desc",
+            "adjustment": "all",
+        },
     )
-    return payload.get("bars") or []
+    bars = list(payload.get("bars") or [])
+    return sorted(bars, key=lambda bar: str(bar.get("t") or ""))
 
 
 def price_context(bars: list[dict], spot: float | None = None) -> dict:
@@ -39,9 +103,14 @@ def price_context(bars: list[dict], spot: float | None = None) -> dict:
     ("near its 20-day high") while spot was 762.02, a true position of 0.672 and
     down 1.84% on the day. The model was reasoning about the wrong market.
     """
-    closes = [float(b["c"]) for b in bars if b.get("c")]
+    usable_bars = [bar for bar in bars if bar.get("c")]
+    closes = [float(bar["c"]) for bar in usable_bars]
     if len(closes) < 5:
         return {"available": False}
+
+    latest_bar_timestamp = usable_bars[-1].get("t")
+    if isinstance(latest_bar_timestamp, datetime):
+        latest_bar_timestamp = latest_bar_timestamp.isoformat()
 
     prev_close = closes[-1]
     last = float(spot) if spot else prev_close
@@ -84,13 +153,20 @@ def price_context(bars: list[dict], spot: float | None = None) -> dict:
             (last / statistics.fmean(window) - 1.0) * 100, 2
         ),
         "bars_used": len(closes),
+        "latest_bar_timestamp": latest_bar_timestamp,
     }
 
 
-def recent_news(settings: Settings, symbols: list[str], limit: int = 8) -> list[dict]:
+def recent_news(
+    settings: Settings,
+    symbols: list[str],
+    limit: int = 8,
+    *,
+    as_of: date | datetime | None = None,
+) -> list[dict]:
     """Headlines only. Sending article bodies would blow the token budget for
     little gain, and the model is ranking a shortlist, not writing research."""
-    since = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    since = (_as_of_instant(as_of) - timedelta(days=3)).isoformat()
     try:
         payload = get_json(
             f"{DATA_HOST}/v1beta1/news",
@@ -110,20 +186,32 @@ def recent_news(settings: Settings, symbols: list[str], limit: int = 8) -> list[
     ]
 
 
-def build(settings: Settings, spots: dict[str, float]) -> dict:
+def build(
+    settings: Settings,
+    spots: dict[str, float],
+    *,
+    as_of: date | datetime | None = None,
+) -> dict:
     """Assemble the context block handed to the reasoning layer."""
+    instant = _as_of_instant(as_of)
+    cycle_as_of: date | datetime = as_of if as_of is not None else instant
     per_symbol = {}
     for symbol in settings.universe:
         try:
             per_symbol[symbol] = price_context(
-                daily_bars(settings, symbol), spot=spots.get(symbol)
+                daily_bars(settings, symbol, as_of=cycle_as_of),
+                spot=spots.get(symbol),
             )
         except ApiError as exc:
             per_symbol[symbol] = {"available": False, "error": str(exc)[:120]}
     return {
+        "as_of": instant.isoformat(),
+        "exchange_date": exchange_date(instant).isoformat(),
         "spot_prices": {k: round(v, 2) for k, v in spots.items()},
         "underlyings": per_symbol,
-        "headlines": recent_news(settings, list(settings.universe)),
+        "headlines": recent_news(
+            settings, list(settings.universe), as_of=cycle_as_of
+        ),
         "data_caveat": (
             "Option quotes come from Alpaca's free INDICATIVE feed: derived, not "
             "OPRA, with trades delayed 15 minutes. Greeks are Black-Scholes "

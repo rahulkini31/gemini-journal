@@ -37,6 +37,9 @@ class RiskBudget:
     max_abs_vega: float = 400.0               # $ per 1 vol point
     max_abs_gamma: float = 50.0
     min_theta: float = -250.0                 # $/day floor (theta is negative when long premium)
+    max_gross_delta: float = 1000.0           # do not let cross-underlying netting hide size
+    max_dollar_delta_1pct_equity_pct: float = 0.02
+    max_local_stress_loss_pct: float = 0.03    # delta/gamma/vega correlated shock
     max_positions_per_underlying: int = 2
     # circuit breaker
     daily_drawdown_halt_pct: float = 0.03     # -3% on the day stops trading
@@ -46,12 +49,42 @@ class RiskBudget:
     max_dte: int = 45
     max_quote_spread_pct: float = 0.15        # measured live: near-ATM SPY quoted 5.63/6.83 = ~19% wide
     min_bid: float = 0.05                     # avoid untradeable pennies
+    min_quote_size: int = 1
+    max_quote_age_seconds: float = 120.0
+    max_underlying_age_seconds: float = 120.0
+    max_leg_quote_skew_seconds: float = 30.0
     # spread shape: keep candidates genuinely spread-like
     min_short_delta: float = 0.15             # short leg must finance the long
     max_short_delta: float = 0.40             # ...without capping upside too early
+    debit_long_target_deltas: tuple[float, ...] = (0.35, 0.45, 0.55)
+    credit_short_target_deltas: tuple[float, ...] = (0.15, 0.25, 0.35)
+    anchor_delta_tolerance: float = 0.08
+    min_credit_long_delta: float = 0.03
+    max_credit_long_delta: float = 0.25
     max_width_pct_of_spot: float = 0.06       # a 58-wide SPY spread is a naked long
+    min_credit_width_ratio: float = 0.20      # collect at least 20% of width
+    max_debit_width_ratio: float = 0.75       # do not spend nearly all potential value
+    min_reward_risk_ratio: float = 0.25       # hard tail-asymmetry floor
     credit_short_target_delta: float = 0.25   # short leg ~25 delta: premium with room
     max_edge_erosion_pct: float = 0.30        # execution drag vs max loss
+    require_positive_expectancy: bool = False # requires calibrated, policy-aware model output
+    shortlist_size: int = 10
+    max_shortlist_per_cluster: int = 2
+    max_shortlist_per_anchor: int = 1
+    shortlist_correlation_groups: tuple[tuple[str, ...], ...] = (
+        ("SPY", "QQQ", "IWM"),
+    )
+    max_shortlist_per_factor_direction: int = 3
+    max_shortlist_per_factor_direction_dte: int = 2
+    shortlist_dte_bucket_days: int = 7
+    max_reprice_deterioration_pct: float = 0.10
+    # scheduled event and American-option assignment controls
+    require_event_calendar: bool = False
+    macro_entry_blackout_hours: float = 24.0
+    macro_post_event_blackout_minutes: float = 30.0
+    ex_dividend_lookahead_days: int = 5
+    assignment_extrinsic_buffer: float = 0.05
+    short_put_carry_rate: float = 0.05
     # exits - entries without exits is not a strategy
     exit_profit_target_pct: float = 0.50      # bank at +50% of cost basis
     exit_stop_loss_pct: float = 0.60          # cut at -60%, before max loss
@@ -67,6 +100,10 @@ class Settings:
     risk: RiskBudget = field(default_factory=RiskBudget)
     db_path: Path = REPO_ROOT / "state" / "bookbound.db"
     audit_path: Path = REPO_ROOT / "state" / "decisions.jsonl"
+    # None keeps library/tests side-effect free; load_settings enables captures.
+    capture_root: Path | None = None
+    # A finite, source-labelled JSON snapshot. None is explicit unavailability.
+    event_calendar_path: Path | None = None
     # LLM
     featherless_key: str = ""
     featherless_base: str = "https://api.featherless.ai/v1"
@@ -97,6 +134,13 @@ def load_settings() -> Settings:
         secret_key=secret,
         paper=os.environ.get("ALPACA_PAPER_TRADE", "true").lower() != "false",
         featherless_key=os.environ.get("FEATHERLESS_API_KEY", ""),
+        capture_root=Path(os.environ.get(
+            "BOOKBOUND_CAPTURE_ROOT", str(REPO_ROOT / "state" / "captures")
+        )),
+        event_calendar_path=(
+            Path(os.environ["BOOKBOUND_EVENT_CALENDAR"])
+            if os.environ.get("BOOKBOUND_EVENT_CALENDAR") else None
+        ),
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     return settings

@@ -15,41 +15,48 @@ from __future__ import annotations
 import json
 import sys
 
+from . import context as market_context
+from . import execute
 from .audit import AuditLog
 from .book import load_book, missing_greeks
 from .config import load_settings
-from .cycle import run_cycle
+from .cycle import construct_candidate_funnel, resolve_cycle_as_of, run_cycle
 from .runner import run as run_loop
 from .market import Contract, market_clock, option_chain, underlying_price
 from .reconcile import summarise
 from .risk import evaluate
-from .structures import (
-    build_vertical_credit_spreads,
-    build_vertical_debit_spreads,
-)
+from .exits import flatten_structure_plans
 
 
-def _chains(settings):
+def _chains(settings, *, as_of=None):
     quotes: dict[str, Contract] = {}
     contracts: list[Contract] = []
+    spots: dict[str, float] = {}
     for symbol in settings.universe:
-        spot = underlying_price(settings, symbol)
+        spot = underlying_price(
+            settings,
+            symbol,
+            as_of=as_of,
+            require_fresh=as_of is not None,
+        )
         if spot is None:
             print(f"  {symbol}: no price available")
             continue
-        chain = option_chain(settings, symbol, spot=spot)
+        spots[symbol] = spot
+        chain = option_chain(settings, symbol, spot=spot, as_of=as_of)
         print(f"  {symbol}: spot {spot:.2f}, {len(chain)} usable contracts")
         contracts.extend(chain)
         quotes.update({c.symbol: c for c in chain})
-    return contracts, quotes
+    return contracts, quotes, spots
 
 
 def cmd_status(settings) -> int:
     clock = market_clock(settings)
+    as_of = resolve_cycle_as_of(clock)
     print(f"market open: {clock.get('is_open')}  next open: {clock.get('next_open')}")
     print("chains:")
-    _, quotes = _chains(settings)
-    book = load_book(settings, quotes)
+    _, quotes, spots = _chains(settings, as_of=as_of)
+    book = load_book(settings, quotes, spots=spots)
     print(f"\nequity ${book.equity:,.2f}   day P&L {book.day_pnl_pct:+.2%}")
     print(f"options buying power ${book.options_buying_power:,.2f}")
     print(f"book greeks: {book.greeks.as_dict()}")
@@ -63,23 +70,32 @@ def cmd_status(settings) -> int:
 
 def cmd_scan(settings) -> int:
     """Deterministic path only - no model is consulted, no order is placed."""
-    contracts, quotes = _chains(settings)
-    book = load_book(settings, quotes)
+    as_of = resolve_cycle_as_of(market_clock(settings))
+    contracts, quotes, spots = _chains(settings, as_of=as_of)
+    book = load_book(settings, quotes, spots=spots)
     unpriced = missing_greeks(book, quotes)
+    context = market_context.build(settings, spots, as_of=as_of)
+    realised_vols = {
+        symbol: node.get("realised_vol_annualised") or 0.0
+        for symbol, node in (context.get("underlyings") or {}).items()
+        if node.get("available")
+    }
+    funnel = construct_candidate_funnel(
+        contracts, spots, realised_vols, book, settings,
+        unpriced_positions=unpriced, as_of=as_of,
+    )
+    print(
+        f"\n{len(funnel.built)} structures built from {len(contracts)} contracts; "
+        f"{len(funnel.admissible)} passed gates; {len(funnel.shortlist)} shortlisted"
+    )
 
-    loss_cap = book.equity * settings.risk.max_loss_per_trade_pct
-    built = []
-    for kind in ("C", "P"):
-        built.extend(build_vertical_debit_spreads(
-            contracts, settings, kind=kind, max_loss_cap=loss_cap))
-        built.extend(build_vertical_credit_spreads(
-            contracts, settings, kind=kind, max_loss_cap=loss_cap))
-    print(f"\n{len(built)} structures built from {len(contracts)} contracts")
-
-    admitted = 0
-    for structure in built:
+    admitted_keys = {candidate.key for candidate in funnel.admissible}
+    shortlist_keys = {candidate.key for candidate in funnel.shortlist}
+    for structure in funnel.built:
         verdict = evaluate(structure, book, settings, unpriced_positions=unpriced)
-        mark = "ADMIT " if verdict.admitted else "REFUSE"
+        mark = "SHORT " if structure.key in shortlist_keys else (
+            "ADMIT " if structure.key in admitted_keys else "REFUSE"
+        )
         summary = structure.summary()
         print(f"\n{mark} {summary['key']}")
         print(f"   {summary['rationale']}")
@@ -87,12 +103,10 @@ def cmd_scan(settings) -> int:
               f"  max gain ${summary['max_gain']:,.0f}  R:R {summary['reward_risk']}")
         print(f"   book delta {verdict.book_before['delta']} -> "
               f"{verdict.book_after['delta']}")
-        if verdict.admitted:
-            admitted += 1
-        else:
+        if not verdict.admitted:
             for reason in verdict.reasons:
                 print(f"   x {reason}")
-    print(f"\n{admitted}/{len(built)} admissible")
+    print(f"\n{len(funnel.admissible)}/{len(funnel.built)} admissible")
     return 0
 
 
@@ -129,26 +143,26 @@ def cmd_run(settings, argv: list[str]) -> int:
 
 
 def cmd_flatten(settings, live: bool) -> int:
-    from .book import load_book
-    from .execute import close_position
-    from .exits import deadline_flatten
     book = load_book(settings, {})
-    orders = deadline_flatten(book.raw_positions, "operator flatten")
-    if not orders:
+    plans = flatten_structure_plans(book.raw_positions, "operator flatten")
+    if not plans:
         print("nothing open")
         return 0
     log = AuditLog(settings.audit_path)
-    for order in orders:
-        result = close_position(order, dry_run=not live)
-        print(f"  close {order.symbol} via {order.side}: {result.status}")
-        log.write("flatten", symbol=order.symbol, status=result.status,
-                  ok=result.ok, dry_run=not live)
+    for plan in plans:
+        result = execute.close_structure(
+            plan, dry_run=not live, settings=settings
+        )
+        print(f"  close {','.join(plan.symbols)} atomically: {result.status}")
+        log.write(
+            "flatten", symbols=list(plan.symbols), status=result.status,
+            ok=result.ok, dry_run=not live,
+        )
     return 0
 
 
 def cmd_panic(settings) -> int:
-    from .execute import cancel_all
-    print(cancel_all())
+    print(execute.cancel_all(settings))
     AuditLog(settings.audit_path).write("panic", reason="operator invoked kill switch")
     return 0
 
