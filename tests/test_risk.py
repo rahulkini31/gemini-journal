@@ -588,3 +588,38 @@ class TestExpectancyGate(unittest.TestCase):
         verdict = evaluate(spread(), book(), SETTINGS)
         checks = {c["check"]: c["passed"] for c in verdict.checks}
         self.assertIn("positive_expectancy", checks)
+
+
+class TestSummaryContract(unittest.TestCase):
+    """Regression: agents.py indexed a summary key that a rename had removed.
+
+    It crashed only on the path where the proposer PICKS a candidate, which no
+    prior test or dry run had reached, so it survived into the live cycle."""
+
+    def test_summary_exposes_every_key_agents_reads(self):
+        required = {"key", "name", "underlying", "expiry", "dte", "qty",
+                    "limit_price", "max_loss", "max_gain", "reward_risk",
+                    "expected_value_under_realised_vol", "quality_score",
+                    "probability_of_profit", "execution_cost", "structure_type"}
+        summary = spread().summary()
+        missing = required - set(summary)
+        self.assertFalse(missing, f"summary is missing {missing}")
+
+    def test_adversary_payload_builds_for_a_picked_candidate(self):
+        """Exercise the exact code path that crashed."""
+        import json
+
+        from bookbound.agents import decide
+        candidates = [spread(width=5.0, debit=2.0), spread(width=5.0, debit=1.5)]
+        picked = candidates[0]
+
+        def fake_proposer(payload, settings):
+            return {"choice": picked.key, "confidence": 0.6, "thesis": "t"}
+
+        # No Featherless key configured -> the adversary call fails closed, but
+        # only AFTER the payload that used to crash has been constructed.
+        decision = decide(candidates, {"equity": 100_000}, SETTINGS,
+                          propose_fn=fake_proposer)
+        self.assertIn(decision.outcome, {"LLM_ERROR", "VETOED", "SELECTED"})
+        self.assertNotEqual(decision.outcome, "NO_TRADE")
+        json.dumps(decision.proposer)

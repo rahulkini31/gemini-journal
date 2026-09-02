@@ -120,7 +120,13 @@ def decide(
             "analyst_thesis": proposal.get("thesis", ""),
             "analyst_confidence": proposal.get("confidence"),
             "rejected_alternatives": [
-                {"key": c.key, "expected_value": c.summary()["expected_value"]}
+                # .get, not [] - a renamed summary key silently crashed the
+                # whole cycle here once, on the only path that runs when the
+                # proposer actually picks something.
+                {"key": c.key,
+                 "expected_value": c.summary().get(
+                     "expected_value_under_realised_vol"),
+                 "quality_score": c.summary().get("quality_score")}
                 for c in candidates[:6] if c.key != picked.key
             ],
         },
