@@ -48,20 +48,48 @@ something*. Every prior dry run ended in NO_TRADE or a veto, so nothing reached
 it, and the refusal-heavy behaviour was **masking a crash on the trading path**.
 Found on trial 3.
 
-## Caveat on the verdict
+## Ablation: the refusals were the PROMPT, not the model
 
-The proposer's system prompt contains *"NO_TRADE is a legitimate and frequently
-correct answer. Prefer it when the shortlist offers no clear edge."* That biases
-it toward refusal, so the refusal rate partly measures the prompt, not the
-model's assessment. An ablation removing that instruction separates the two.
+The system prompt contained *"NO_TRADE is a legitimate and frequently correct
+answer. Prefer it when the shortlist offers no clear edge."* Replacing that one
+instruction with a neutral one, on the same shortlist, same model, same context:
+
+| Prompt | Selected a candidate | Picks (rank index) | Adversary |
+|---|---|---|---|
+| WITH refusal bias | **0 / 6** | all NO_TRADE | n/a |
+| WITHOUT refusal bias | **6 / 6** | `[3, 0, 0, 0, 0, 0]` | **vetoed 6/6** |
+
+**This overturns the reading above.** The 22/22 refusal rate measured an
+instruction I wrote, not the model's assessment of the trades. "It refuses
+regardless" was wrong.
+
+The corrected finding is narrower but still decisive: given a neutral prompt the
+proposer **agrees with rank 1 in five of six trials**. It deviated once, to
+rank 3, and whether that deviation was an improvement cannot be determined
+without forward returns. As a selector it is close to inert - it mostly
+reproduces the deterministic ranking at the cost of an API call and several
+seconds.
+
+## The pipeline currently cannot produce a trade
+
+The two arms together show the system is blocked at every configuration:
+
+* with the biased prompt, the **proposer** refuses everything;
+* with a neutral prompt, the **adversary** vetoes everything (6/6).
+
+Whichever way it is configured, no order is reachable. This is the single most
+important operational finding in this document, and neither dry runs nor unit
+tests surfaced it - only running the two arms side by side did.
 
 ## What follows from this
 
-On this evidence the proposer earns nothing **as a selector**. The adversary is
-a different case — it caught an inverted IV/RV comparison in a live cycle, which
-was a genuine save.
+The proposer adds almost nothing as a selector: five of six picks reproduce
+rank 1. Dropping it and taking rank 1 deterministically removes one model, one
+failure mode and roughly half the cycle latency, at a cost this evaluation
+cannot distinguish from zero.
 
-The defensible simplification is to drop the proposer, take rank 1
-deterministically, and keep the adversary as a veto. That is testable with the
-same harness and would remove one model, one failure mode, and roughly half the
-cycle latency.
+The adversary is the harder question. It caught an inverted IV/RV comparison in
+a live cycle - a genuine save - but it also vetoes 6 out of 6 otherwise-valid
+candidates, which makes it indistinguishable from a blanket refusal in exactly
+the way the proposer was. It needs the same ablation before it can be trusted as
+a filter rather than a brake.
