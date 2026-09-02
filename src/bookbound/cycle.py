@@ -17,6 +17,7 @@ from .config import Settings
 from .context import exchange_date
 from .exits import ExitPlan, evaluate_structure_exits, price_exit_plan
 from .market import (
+    UnderlyingSnapshot,
     Contract,
     market_clock,
     option_chain,
@@ -785,15 +786,53 @@ def run_cycle(
         observation_as_of = resolve_cycle_as_of(observation_clock)
         if observation_as_of < cycle_as_of:
             raise RuntimeError("broker clock moved backwards during observation")
-        stale_underliers = sorted(
-            symbol for symbol, observed in underlying_marks.items()
-            if not underlying_snapshot_is_fresh(
+        # RE-OBSERVE rather than age the pre-collection marks. Each mark was
+        # taken before its own chain was fetched, so judging it after every
+        # chain has been collected makes staleness a function of how long
+        # collection took, not of data quality: with three underliers the first
+        # mark had aged past the bound before any decision was possible, and
+        # the whole cycle halted with DATA_INVALID on healthy data.
+        #
+        # The safety intent is that options are valued against a CURRENT
+        # underlier, so refresh the marks and validate those.
+        refreshed_marks: dict[str, UnderlyingSnapshot] = {}
+        stale_underliers: list[str] = []
+        for symbol in list(underlying_marks):
+            try:
+                observed = underlying_snapshot(settings, symbol)
+            except (ApiError, OSError):
+                observed = None
+            if observed is None or not underlying_snapshot_is_fresh(
                 observed, settings, observation_as_of
-            )
-        )
+            ):
+                stale_underliers.append(symbol)
+                continue
+            refreshed_marks[symbol] = observed
+            spots[symbol] = observed.price
+
+        # An individual underlier going quiet is a reason to ignore that
+        # underlier, not to abandon the cycle: dropping it removes its
+        # candidates while the rest of the book stays managed.
         if stale_underliers:
+            audit.write(
+                "underlier_dropped_stale",
+                symbols=sorted(stale_underliers),
+                phase="post_observation",
+            )
+            for symbol in stale_underliers:
+                underlying_marks.pop(symbol, None)
+                spots.pop(symbol, None)
+            dropped = {s for s in stale_underliers}
+            contracts = [c for c in contracts if c.underlying not in dropped]
+            quotes = {
+                sym: c for sym, c in quotes.items() if c.underlying not in dropped
+            }
+        underlying_marks.update(refreshed_marks)
+
+        if not underlying_marks:
             raise RuntimeError(
-                f"underlying snapshots stale after chain collection: {stale_underliers}"
+                f"no underlier has a fresh mark after chain collection: "
+                f"{sorted(stale_underliers)}"
             )
     except RuntimeError as exc:
         report.outcome = "DATA_INVALID"
