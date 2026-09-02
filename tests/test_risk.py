@@ -562,3 +562,29 @@ class TestContextFreshness(unittest.TestCase):
         self.assertAlmostEqual(flat["realised_vol_annualised"], 0.0, places=6)
         self.assertGreater(shocked["realised_vol_annualised"], 0.0,
                            "a live gap must raise realised vol")
+
+
+class TestExpectancyGate(unittest.TestCase):
+    """Regression: ranking on probability of profit put a NEGATIVE-expectancy
+    trade at rank 1 - PoP 0.795, max gain $151, max loss $949. High win rate is
+    not an edge when the loss is six times the gain."""
+
+    def test_rejects_high_pop_negative_expectancy(self):
+        from bookbound.structures import _price_credit_spread, expected_value
+        # sell the 746 put, buy the 735 put: 11 wide, ~1.5 credit
+        short = contract("S", 746.0, kind="P", delta=-0.21, bid=3.00, ask=3.10)
+        long = contract("L", 735.0, kind="P", delta=-0.10, bid=1.45, ask=1.50)
+        built = _price_credit_spread(long, short, "P", EXPIRY,
+                                     spot=762.0, realised_vol=0.1324)
+        self.assertIsNotNone(built)
+        self.assertLess(expected_value(built), 0.0,
+                        "this structure must be negative expectancy")
+        verdict = evaluate(built, book(), SETTINGS)
+        self.assertFalse(verdict.admitted)
+        self.assertTrue(any("positive_expectancy" in r for r in verdict.reasons),
+                        verdict.reasons)
+
+    def test_admits_positive_expectancy(self):
+        verdict = evaluate(spread(), book(), SETTINGS)
+        checks = {c["check"]: c["passed"] for c in verdict.checks}
+        self.assertIn("positive_expectancy", checks)

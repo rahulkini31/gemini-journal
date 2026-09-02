@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from .book import Book, Greeks, greeks_of_legs
 from .config import Settings
-from .structures import Structure, execution_drag
+from .structures import Structure, execution_drag, expected_value
 
 
 @dataclass
@@ -135,6 +135,25 @@ def evaluate(
         f"vs floor {budget.min_theta:,.1f}",
         before=round(before.theta, 2), after=round(after.theta, 2),
         floor=budget.min_theta,
+    )
+
+    # --- expectancy ---------------------------------------------------------
+    # Probability of profit alone is not a quality measure: it rewards exactly
+    # the trade that collects a little very often and gives it all back at once.
+    # The rank-1 candidate under the old score had PoP 0.795 with $151 of upside
+    # against $949 of downside - a 79.5% chance of $151 and a 20.5% chance of
+    # -$949 is NEGATIVE expectancy, and it was being ranked first.
+    #
+    # This gate is model-based and inherits the skew caveat on expected_value,
+    # so it is used only to reject clearly negative expectancy, never to rank.
+    expectancy = expected_value(structure)
+    verdict.record(
+        "positive_expectancy",
+        expectancy > 0,
+        f"expected value ${expectancy:,.2f} under realised vol "
+        f"(max gain ${structure.max_gain:,.0f} at p={1 - abs(structure.short.delta):.2f} "
+        f"vs max loss ${structure.max_loss:,.0f})",
+        expected_value=round(expectancy, 2),
     )
 
     # --- edge erosion -------------------------------------------------------
