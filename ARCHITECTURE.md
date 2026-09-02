@@ -113,6 +113,38 @@ independence is the point, and a different model family is more likely to be ind
 a second call to the same one. It also makes the $300 Featherless credit at 1st place, and partner
 prize eligibility, a by-product of the design rather than a bolt-on (`06-partner-tech.md`).
 
+### Valuation — model only what cannot be observed
+
+The payoff of a vertical is a difference of two European options, so its
+expectation under a lognormal has a closed form. That is integrated in full,
+cross-checked against Monte Carlo, with a test asserting that a spread bought at
+fair value prices to exactly zero.
+
+The harder lesson was about **which** quantities deserve a model. Three ranking
+metrics were tried and discarded, each because it looked like edge and was not:
+
+| Metric | Why it failed |
+|---|---|
+| Reward / risk | Always picked the widest spread with the most worthless short leg — a long option wearing a costume |
+| Delta-weighted EV | Delta *is* the risk-neutral probability, so measuring market prices against it returns ~0 by construction; the positive values came from a two-point approximation that discarded 4.6–10.9% of the probability mass |
+| Variance premium | Dominated by skew with a fixed sign per structure type — every SPY put debit spread showed a large positive premium while SPY put IV was in fact *above* realised vol |
+
+Two measurement errors were caught the same way, by checking the model against
+the market rather than by reading the code:
+
+- **Pricing off spot with `r=0`** misvalued SPY calls and puts by up to a dollar
+  in *opposite* directions. The forward is observable from put-call parity, so
+  it is observed rather than assembled from a guessed rate and dividend yield.
+- **Vendor implied vols violate put-call parity** — Alpaca's indicative feed
+  reports put IV exceeding call IV by a uniform 1.61 vol points at every strike.
+  They cannot be consumed leg-by-leg. The market's own valuation is now taken
+  from the quoted mid, which needs no model at all.
+
+Ranking therefore uses a **quality score** built only from observed execution
+cost and payoff geometry. It makes no alpha claim, and that is deliberate: this
+system has a rigorously gated execution path and an unvalidated selection model,
+and the documentation should not pretend otherwise.
+
 ### Portfolio risk engine — the differentiator
 Deterministic, no model in the loop, unit-tested. It computes:
 

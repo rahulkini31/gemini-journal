@@ -107,6 +107,19 @@ structure and flags naked shorts.
 **Refusals are the product.** Every decision *and every refusal* is appended to
 `state/decisions.jsonl` with the bound that failed and the numbers on both sides of it.
 
+## What it does not claim
+
+Candidate selection is **not** an alpha claim. Three ranking metrics were tried
+and discarded for measuring their own assumptions rather than the market —
+reward/risk, delta-weighted EV, and a skew-contaminated variance premium (see
+`ARCHITECTURE.md`). Ranking now uses only observed execution cost and payoff
+geometry.
+
+Nothing here is backtested. The gates, budgets and exit thresholds are chosen
+parameters, not fitted ones. What is defensible is the execution path: defined
+risk by construction, deterministic gates, fail-closed behaviour, idempotent
+orders, leg reconciliation, and a complete audit trail.
+
 ## Safety
 
 - MCP server runs with **no `trading` toolset** — the model has no order tool to call.
