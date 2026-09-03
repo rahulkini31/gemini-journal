@@ -112,6 +112,9 @@ class Settings:
     # GLM-5.2 is a reasoning model: it spends hundreds of tokens before answering,
     # and a tight budget yields an empty string rather than an error.
     adversary_max_tokens: int = 2500
+    # The model reviewer is an enhancement over complete deterministic gating,
+    # not the safety system. Set True to refuse trading when it is unreachable.
+    require_model_review: bool = False
 
     @property
     def auth_headers(self) -> dict[str, str]:

@@ -90,8 +90,11 @@ class TestTerminalScenarioSummary(unittest.TestCase):
 
 class TestAgentMetricSemantics(unittest.TestCase):
     def test_prompts_forbid_treating_uncalibrated_scenario_as_true_edge(self):
-        proposer = agents.PROPOSER_SYSTEM.lower()
-        adversary = agents.ADVERSARY_SYSTEM.lower()
+        # Selection is deterministic now and has no prompt; the reviewer is
+        # the only model-facing text left, so it carries the whole obligation.
+        reviewer = agents.REVIEWER_SYSTEM.lower()
+        proposer = reviewer
+        adversary = reviewer
 
         self.assertNotIn("better expected value", proposer)
         for prompt in (proposer, adversary):

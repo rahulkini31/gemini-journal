@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from . import context as market_context
 from . import execute, reconcile
-from .agents import ADVERSARY_SYSTEM, PROPOSER_SYSTEM, decide
+from .agents import REVIEWER_SYSTEM, decide
 from .audit import AuditLog
 from .http import ApiError
 from .book import Book, load_book, missing_greeks
@@ -538,14 +538,13 @@ def run_cycle(
                 as_of=cycle_as_of,
                 settings=settings,
                 model_provenance={
-                    "proposer": {
+                    # Selection is deterministic and carries no prompt; only
+                    # the reviewer has one, and its hash is what makes a
+                    # replayed decision comparable to the original.
+                    "selection": {"method": "deterministic_rank_1"},
+                    "reviewer": {
                         "prompt_sha256": hashlib.sha256(
-                            PROPOSER_SYSTEM.encode("utf-8")
-                        ).hexdigest(),
-                    },
-                    "adversary": {
-                        "prompt_sha256": hashlib.sha256(
-                            ADVERSARY_SYSTEM.encode("utf-8")
+                            REVIEWER_SYSTEM.encode("utf-8")
                         ).hexdigest(),
                     },
                 },
