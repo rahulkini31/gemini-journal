@@ -104,6 +104,42 @@ def resolve_cycle_as_of(
     return parsed.astimezone(timezone.utc)
 
 
+#: How far after the cycle reference a mark may legitimately be observed.
+#: Chain collection for a multi-underlier universe takes tens of seconds, so a
+#: mark taken during it is necessarily newer than the reference. Beyond this the
+#: timestamp is not collection latency, it is wrong.
+MAX_OBSERVATION_SKEW_SECONDS = 600.0
+
+
+def _observation_reference(as_of: datetime, observed) -> datetime:
+    """Reference clock for judging a mark we just fetched.
+
+    Freshness must be measured against the moment of OBSERVATION, not the
+    moment the cycle started. Each underlier's mark is taken after the previous
+    underlier's chain fetch, so by the third symbol the mark is timestamped tens
+    of seconds after ``as_of``. Measured against ``as_of`` that reads as a
+    future-dated quote, trips the 2-second future-skew guard, and skips the
+    chain entirely - which left held positions unpriceable and failed
+    book_fully_priced on every candidate for an entire session.
+
+    A mark cannot be stale relative to itself, so when it is newer than the
+    reference the mark's own timestamp becomes the reference. Wall-clock time is
+    deliberately NOT used: it would make a replay depend on when it was run.
+    """
+    if observed is None or getattr(observed, "timestamp", None) is None:
+        return as_of
+    stamped = observed.timestamp
+    if stamped.tzinfo is None:
+        return as_of
+    if stamped <= as_of:
+        return as_of
+    if (stamped - as_of).total_seconds() > MAX_OBSERVATION_SKEW_SECONDS:
+        # Not collection latency. Leave the reference alone so the normal
+        # freshness rule rejects it.
+        return as_of
+    return stamped
+
+
 def construct_candidate_funnel(
     contracts: list[Contract],
     spots: dict[str, float],
@@ -762,8 +798,17 @@ def run_cycle(
                     if capture is not None else None
                 ),
             )
+            # Judge freshness against the moment we OBSERVED, not a reference
+            # captured at cycle start. Each symbol's mark is taken after the
+            # previous symbol's chain fetch, so by the third underlier the mark
+            # is timestamped tens of seconds AFTER cycle_as_of. That reads as a
+            # future-dated quote, trips the 2-second future-skew guard, and
+            # skips the chain entirely - which left held positions in that
+            # underlier unpriceable and failed book_fully_priced on every
+            # candidate. A quote newer than the reference is not stale; it is
+            # fresher. Only genuine staleness is a hazard.
             if not underlying_snapshot_is_fresh(
-                observed, settings, cycle_as_of
+                observed, settings, _observation_reference(cycle_as_of, observed)
             ):
                 continue
             assert observed is not None
@@ -802,7 +847,8 @@ def run_cycle(
             except (ApiError, OSError):
                 observed = None
             if observed is None or not underlying_snapshot_is_fresh(
-                observed, settings, observation_as_of
+                observed, settings,
+                _observation_reference(observation_as_of, observed),
             ):
                 stale_underliers.append(symbol)
                 continue

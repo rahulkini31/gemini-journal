@@ -170,3 +170,71 @@ class DescribeModelAuthorityLimits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class DescribeObservationReference(unittest.TestCase):
+    """Regression: a mark observed DURING chain collection is newer than the
+    cycle reference, which read as a future-dated quote and skipped that
+    underlier's chain entirely. Held positions in it then could not be priced
+    and book_fully_priced failed on every candidate for a whole session."""
+
+    @staticmethod
+    def _mark(stamp):
+        from bookbound.market import UnderlyingSnapshot
+        return UnderlyingSnapshot(
+            symbol="QQQ", price=716.0, timestamp=stamp, source="latest_trade",
+        )
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        from bookbound import cycle
+        self.cycle = cycle
+        self.as_of = datetime(2026, 9, 3, 15, 0, 0, tzinfo=timezone.utc)
+        self.datetime, self.timezone = datetime, timezone
+
+    def test_given_mark_observed_after_reference_then_it_is_not_stale(self):
+        from datetime import timedelta
+        later = self._mark(self.as_of + timedelta(seconds=45))
+
+        reference = self.cycle._observation_reference(self.as_of, later)
+
+        self.assertEqual(reference, later.timestamp,
+                         "a mark cannot be stale relative to itself")
+
+    def test_given_mark_older_than_reference_then_reference_is_unchanged(self):
+        from datetime import timedelta
+        earlier = self._mark(self.as_of - timedelta(seconds=30))
+
+        self.assertEqual(
+            self.cycle._observation_reference(self.as_of, earlier), self.as_of,
+            "genuine staleness must still be measured against the cycle clock",
+        )
+
+    def test_given_absurdly_future_mark_then_reference_is_unchanged(self):
+        from datetime import timedelta
+        absurd = self._mark(self.as_of + timedelta(hours=3))
+
+        self.assertEqual(
+            self.cycle._observation_reference(self.as_of, absurd), self.as_of,
+            "beyond the collection window a future stamp is wrong, not latency",
+        )
+
+    def test_reference_never_depends_on_wall_clock(self):
+        """Replay must not depend on when it is run."""
+        from datetime import timedelta
+        mark = self._mark(self.as_of + timedelta(seconds=20))
+
+        first = self.cycle._observation_reference(self.as_of, mark)
+        second = self.cycle._observation_reference(self.as_of, mark)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, mark.timestamp)
+
+    def test_given_missing_timestamp_then_reference_is_unchanged(self):
+        self.assertEqual(
+            self.cycle._observation_reference(self.as_of, self._mark(None)),
+            self.as_of,
+        )
+        self.assertEqual(
+            self.cycle._observation_reference(self.as_of, None), self.as_of,
+        )
