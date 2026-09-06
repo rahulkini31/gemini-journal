@@ -1,0 +1,6 @@
+{
+  "name": "Secure Personal Gemini Journal",
+  "description": "An accessible, polished, and secure full-stack journaling and brainstorming assistant integrated with Gemini and Firebase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

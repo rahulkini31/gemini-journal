@@ -1,0 +1,13 @@
+{
+  "projectId": "genai-academy-temp",
+  "appId": "1:243014095531:web:83635394b312f39dc71dee",
+  "apiKey": "AIzaSyCQkP58yyL3TWVjd1oZB8vsQRcKSxsOyCg",
+  "authDomain": "genai-academy-temp.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "genai-academy-temp.firebasestorage.app",
+  "messagingSenderId": "243014095531",
+  "measurementId": "",
+  "oAuthClientId": "243014095531-gvkimh249k131ri4pfoih701bksc33jr.apps.googleusercontent.com",
+  "recaptchaSiteKey": "",
+  "recaptchaEnterpriseSiteKey": "6LceEJktAAAAAHia_AsQp4K2NK6Fh4MalzQt9H_7"
+}
