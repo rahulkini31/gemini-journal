@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from app.config import MEMORY_RECALL_LIMIT
+from app.text_limits import first_text_part
 from app.tools.journal_tools import JournalToolError, require_uid
 
 
@@ -41,7 +42,7 @@ def build_recall_tool(*, memory_service: Any, app_name: str = "secure_journal") 
             "candidates": [
                 {
                     "interaction_id": candidate.id,
-                    "summary": f"<journal-data>{_entry_text(candidate)}</journal-data>",
+                    "summary": f"<journal-data>{first_text_part(candidate.content)}</journal-data>",
                     "timestamp": candidate.timestamp,
                 }
                 for candidate in candidates
@@ -49,11 +50,3 @@ def build_recall_tool(*, memory_service: Any, app_name: str = "secure_journal") 
         }
 
     return recall_related_reflections
-
-
-def _entry_text(entry: Any) -> str:
-    parts = getattr(entry.content, "parts", None) or []
-    for part in parts:
-        if getattr(part, "text", None):
-            return part.text
-    return ""

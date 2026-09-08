@@ -131,7 +131,7 @@ function truncate(text: string, max: number): string {
 function computeLayout(nodes: GraphViewNode[], edges: GraphViewEdge[], height: number): LaidOutNode[] {
   if (nodes.length === 0) return [];
 
-  type SimNode = GraphViewNode & { x: number; y: number; index?: number };
+  type SimNode = GraphViewNode & { x: number; y: number; vx?: number; vy?: number; index?: number };
   const simNodes: SimNode[] = nodes.map((node) => ({ ...node, x: 0, y: 0 }));
   const nodeIds = new Set(simNodes.map((node) => node.id));
   const simLinks = edges
@@ -164,11 +164,21 @@ function computeLayout(nodes: GraphViewNode[], edges: GraphViewEdge[], height: n
   // pair near the edge rendered nearly on top of each other despite a
   // 70px link distance). Clamping every tick instead keeps the forces
   // interacting correctly against the actual boundary throughout.
+  //
+  // Zeroing the velocity component when a clamp fires (not just the
+  // position) matters too: d3-force carries a node's velocity from tick to
+  // tick, so a node pinned at the boundary with its pre-clamp velocity
+  // intact gets shoved into the same wall again next tick — a small
+  // jitter/sticking artifact in denser graphs, caught during /simplify.
   for (let tick = 0; tick < SIMULATION_TICKS; tick += 1) {
     simulation.tick();
     for (const node of simNodes) {
-      node.x = clamp(node.x, minX, maxX);
-      node.y = clamp(node.y, minY, maxY);
+      const clampedX = clamp(node.x, minX, maxX);
+      const clampedY = clamp(node.y, minY, maxY);
+      if (clampedX !== node.x) node.vx = 0;
+      if (clampedY !== node.y) node.vy = 0;
+      node.x = clampedX;
+      node.y = clampedY;
     }
   }
 

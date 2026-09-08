@@ -24,21 +24,23 @@ from typing import Any, Callable, Iterable, Optional
 
 import networkx as nx
 
-from app.config import MIN_MENTIONS_FOR_INSIGHT
+from app.config import MAX_GRAPH_NODES, MIN_MENTIONS_FOR_INSIGHT
+from app.sentiment.vocabulary import normalize_label
 from app.tools.journal_tools import require_uid
 
 MAX_EXAMPLE_PHRASES_PER_EDGE = 3
 MAX_PATTERNS_RETURNED = 10
 
 
-def _normalize(label: str) -> str:
-    return " ".join(label.strip().lower().split())
-
-
 def _load_sentiment_records(db: Any, uid: str) -> Iterable[tuple[list[dict], list[dict]]]:
+    # Bounded the same way app/tools/graph_tools.py's sibling loader is
+    # (MAX_GRAPH_NODES, shared via app/config.py) — previously unbounded
+    # here, harmless only because COMPLETED_INTERACTION_LIMIT already caps
+    # the collection size; found and fixed by /simplify for consistency.
     docs = (
         db.collection(f"users/{uid}/interactions")
         .where("sentimentStatus", "==", "completed")
+        .limit(MAX_GRAPH_NODES)
         .stream()
     )
     for doc in docs:
@@ -109,7 +111,7 @@ def _compute_patterns(
 
     graph, edge_stats = _build_pattern_graph(records)
 
-    normalized_filter = _normalize(trigger_label) if trigger_label else None
+    normalized_filter = normalize_label(trigger_label) if trigger_label else None
     patterns = []
     graph_edges = []
     for (trigger, emotion), stats in edge_stats.items():
@@ -122,7 +124,7 @@ def _compute_patterns(
             "mention_count": stats["count"],
             "average_intensity": average_intensity,
         })
-        if normalized_filter and _normalize(trigger) != normalized_filter:
+        if normalized_filter and normalize_label(trigger) != normalized_filter:
             continue
         phrases = stats["phrases"]
         patterns.append({

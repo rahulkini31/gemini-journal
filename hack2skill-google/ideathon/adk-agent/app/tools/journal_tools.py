@@ -34,6 +34,8 @@ from app.config import (
     MONTHLY_ATTEMPT_LIMIT,
     PENDING_STALE_SECONDS,
     USER_COOLDOWN_SECONDS,
+    default_transactional,
+    month_key,
 )
 from app.text_limits import token_upper_bound
 
@@ -47,10 +49,6 @@ class JournalToolError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
-
-
-def _month_key(now: datetime) -> str:
-    return f"{now.year:04d}-{now.month:02d}"
 
 
 def require_uid(tool_context: Any) -> str:
@@ -116,7 +114,7 @@ def persist_completed_interaction(
     current = now()
     interaction_ref = db.document(f"users/{uid}/interactions/{idempotency_request_id}")
     user_ref = db.document(f"users/{uid}")
-    limit_ref = db.document(f"serviceLimits/monthly/months/{_month_key(current)}")
+    limit_ref = db.document(f"serviceLimits/monthly/months/{month_key(current)}")
     session_query = (
         db.collection(f"users/{uid}/interactions")
         .where("sessionId", "==", session_id)
@@ -146,10 +144,7 @@ def persist_completed_interaction(
             session_query=session_query,
         )
 
-    if transactional is None:
-        from google.cloud import firestore  # local import: keeps module importable without the SDK in unit tests
-
-        transactional = firestore.transactional
+    transactional = transactional or default_transactional()
 
     return transactional(run)(db.transaction())
 
@@ -220,10 +215,16 @@ def _admit_and_write(
         turn_order = len(list(session_query.get(transaction=transaction))) + 1
 
     transaction.set(limit_ref, {
-        "month": _month_key(current),
+        "month": month_key(current),
         "completedInteractionCount": completed_count + 1,
         "completedInteractionLimit": COMPLETED_INTERACTION_LIMIT,
-        "inFlightInteractionCount": max(0, in_flight_count - (0 if is_fresh else 0)),
+        # This port never increments inFlightInteractionCount (unlike
+        # server.ts, which has a separate reserve-then-complete phase this
+        # simplified admission transaction collapses into one write — see
+        # this file's module docstring) — always a pass-through, not a
+        # decrement. Writing `max(0, in_flight_count - 0)` here was dead,
+        # misleading no-op logic; found and removed by /simplify.
+        "inFlightInteractionCount": in_flight_count,
         "monthlyAttemptLimit": MONTHLY_ATTEMPT_LIMIT,
         "updatedAt": current,
     }, merge=True)
@@ -243,7 +244,7 @@ def _admit_and_write(
         "status": "completed",
         "idempotencyRequestId": idempotency_request_id,
         "interactionCapacityReserved": False,
-        "capacityMonth": _month_key(current),
+        "capacityMonth": month_key(current),
         "timestamps": timestamps,
         "updatedAt": current,
     }, merge=bool(existing))
@@ -339,7 +340,7 @@ def build_journal_tools(*, db: Any, now: Callable[[], datetime] = lambda: dateti
         """
         uid = require_uid(tool_context)
         current = now()
-        limit_snap = db.document(f"serviceLimits/monthly/months/{_month_key(current)}").get()
+        limit_snap = db.document(f"serviceLimits/monthly/months/{month_key(current)}").get()
         user_snap = db.document(f"users/{uid}").get()
         limit_data = limit_snap.to_dict() or {}
         completed = int(limit_data.get("completedInteractionCount", 0))

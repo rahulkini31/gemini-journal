@@ -11,6 +11,8 @@ window instead.
 from __future__ import annotations
 
 import os
+from datetime import datetime
+from typing import Callable
 
 BODY_LIMIT_BYTES = 4 * 1024
 
@@ -93,6 +95,37 @@ MIN_MENTIONS_FOR_INSIGHT = 2
 
 # Firestore document-id shaped identifiers (sessionId / idempotencyRequestId).
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9_-]{12,128}$"
+
+# Shared cap on how many of a user's own interactions a single graph-building
+# request reads from Firestore — used by both app/tools/graph_tools.py and
+# app/tools/sentiment_graph_tools.py, which independently scan the same
+# users/{uid}/interactions collection with different status filters. Kept
+# here (not duplicated per-file) so both stay bounded the same way if this
+# is ever relaxed.
+MAX_GRAPH_NODES = 200
+
+
+def month_key(now: datetime) -> str:
+    """The `serviceLimits/monthly/months/{key}` document key, shared by
+    every quota/capacity call site (app/tools/journal_tools.py,
+    app/callbacks/guardrails.py) so the format can't drift between them."""
+    return f"{now.year:04d}-{now.month:02d}"
+
+
+def default_transactional() -> Callable:
+    """The real `google.cloud.firestore.transactional` decorator, imported
+    lazily so this module stays importable without the SDK installed (as in
+    unit tests). Shared by every Firestore-transaction call site that needs
+    an injectable escape hatch for tests — see app/tools/journal_tools.py's
+    persist_completed_interaction and app/callbacks/guardrails.py's
+    reserve_model_attempt, both of which accept a `transactional` override
+    for exactly this reason: that real decorator drives actual GAPIC
+    begin/commit/retry machinery a lightweight fake transaction can't
+    satisfy, so tests pass `transactional=lambda fn: fn` instead.
+    """
+    from google.cloud import firestore
+
+    return firestore.transactional
 
 
 def project_id() -> str:

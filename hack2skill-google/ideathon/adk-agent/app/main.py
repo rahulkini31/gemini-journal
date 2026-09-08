@@ -25,6 +25,7 @@ is also the first place CORSMiddleware is needed.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +55,7 @@ from app.security.app_check import AppCheckError, build_default_verifier
 from app.security.firebase_auth import AuthError, verify_authorization_header
 from app.sentiment.extraction import build_extraction_instruction, build_extraction_source, parse_extraction_response
 from app.sentiment.vocabulary import load_trigger_vocabulary
-from app.text_limits import token_upper_bound, truncate_to_token_cap
+from app.text_limits import first_text_part, token_upper_bound, truncate_to_token_cap
 from app.tools.graph_tools import get_full_relationship_graph
 from app.tools.journal_tools import JournalToolError, persist_completed_interaction, record_sentiment_analysis
 from app.tools.sentiment_graph_tools import get_full_emotional_pattern_graph
@@ -64,7 +65,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read_firebase_config() -> dict:
-    config_path = _REPO_ROOT / "firebase-applet-config.json"
+    # FIREBASE_APPLET_CONFIG_PATH overrides the default derived-from-
+    # directory-depth path (_REPO_ROOT, i.e. parents[2] of this file) —
+    # that arithmetic only holds if a deployment mirrors this repo's exact
+    # nesting depth (adk-agent/Dockerfile does, deliberately; see its
+    # comments), which is fragile to any future layout change. Since a
+    # broken mapping fails *silently* here (empty config, not an error),
+    # an explicit override is a cheap safety valve without changing the
+    # default behavior for anyone not setting it. Found by /simplify.
+    override = os.environ.get("FIREBASE_APPLET_CONFIG_PATH")
+    config_path = Path(override) if override else _REPO_ROOT / "firebase-applet-config.json"
     try:
         return json.loads(config_path.read_text("utf-8"))
     except Exception:  # noqa: BLE001 - never crash the app over an optional config file
@@ -424,7 +434,7 @@ async def _generate_summary_and_sentiment(
     )
     raw_text = ""
     async for response in extraction_model.generate_content_async(request):
-        raw_text = _response_text(response) or raw_text
+        raw_text = first_text_part(getattr(response, "content", None)) or raw_text
 
     result = parse_extraction_response(raw_text, vocabulary=vocabulary)
     if not result.title:
@@ -450,15 +460,6 @@ def _build_llm_request(*, instruction: str, text: str, max_output_tokens: int):
     )
 
 
-def _response_text(response: Any) -> str:
-    content = getattr(response, "content", None)
-    parts = getattr(content, "parts", None) or []
-    for part in parts:
-        if getattr(part, "text", None):
-            return part.text
-    return ""
-
-
 def _build_production_dependencies():  # pragma: no cover - real-credential wiring, not exercised by tests
     import firebase_admin
     from firebase_admin import auth as firebase_auth_sdk
@@ -472,8 +473,6 @@ def _build_production_dependencies():  # pragma: no cover - real-credential wiri
 
 
 if __name__ == "__main__":  # pragma: no cover
-    import os
-
     import uvicorn
 
     _db, _auth_client = _build_production_dependencies()

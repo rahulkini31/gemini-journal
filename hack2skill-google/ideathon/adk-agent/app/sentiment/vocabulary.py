@@ -33,12 +33,12 @@ from app.config import MAX_TRIGGER_VOCABULARY_SIZE, TRIGGER_LABEL_SIMILARITY_THR
 _MINOR_WORDS = frozenset({"a", "an", "the", "at", "in", "on", "of", "with", "and", "my"})
 
 
-def _normalize(label: str) -> str:
+def normalize_label(label: str) -> str:
     return " ".join(label.strip().lower().split())
 
 
 def _content_tokens(label: str) -> set[str]:
-    return {word for word in _normalize(label).split() if word not in _MINOR_WORDS}
+    return {word for word in normalize_label(label).split() if word not in _MINOR_WORDS}
 
 
 def _label_similarity(a: str, b: str) -> float:
@@ -56,7 +56,7 @@ def _label_similarity(a: str, b: str) -> float:
     the code-side safety net for surface-level inconsistency.
     """
     tokens_a, tokens_b = _content_tokens(a), _content_tokens(b)
-    char_ratio = SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+    char_ratio = SequenceMatcher(None, normalize_label(a), normalize_label(b)).ratio()
     if not tokens_a or not tokens_b:
         return char_ratio
     jaccard = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
@@ -79,7 +79,7 @@ def load_trigger_vocabulary(db: Any, uid: str) -> list[str]:
         for trigger in triggers:
             label = trigger.get("label") if isinstance(trigger, dict) else None
             if isinstance(label, str) and label.strip():
-                counts[_normalize(label)] += 1
+                counts[normalize_label(label)] += 1
     return [label for label, _count in counts.most_common(MAX_TRIGGER_VOCABULARY_SIZE)]
 
 
@@ -89,7 +89,7 @@ def canonicalize_trigger_label(proposed: str, vocabulary: list[str]) -> str:
     genuinely new label). Comparison is case/whitespace-insensitive but the
     returned string preserves the existing vocabulary's original casing so
     the graph doesn't accumulate case-variant duplicates either."""
-    normalized_proposed = _normalize(proposed)
+    normalized_proposed = normalize_label(proposed)
     if not normalized_proposed:
         return normalized_proposed
     best_label = None

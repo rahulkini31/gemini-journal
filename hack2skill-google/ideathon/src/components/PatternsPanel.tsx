@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, LoaderCircle, Network, Sparkles, X } from "lucide-react";
 import { fetchEmotionalPatternGraph, fetchRelationshipGraph } from "../lib/graphApi";
 import { EmotionalPatternGraph, RelationshipGraph } from "../types";
@@ -52,27 +52,36 @@ export default function PatternsPanel({ idToken, onClose }: PatternsPanelProps) 
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  const relationshipNodes: GraphViewNode[] = (relationshipGraph?.nodes || []).map((node) => ({
-    id: node.id,
-    label: node.summary,
-  }));
-  const relationshipEdges: GraphViewEdge[] = (relationshipGraph?.edges || []).map((edge) => ({
-    source: edge.source,
-    target: edge.target,
-    label: edge.reason,
-  }));
+  // Memoized on the fetched graph objects (not recomputed every render):
+  // GraphView's own useMemo only skips its 300-tick force simulation when
+  // its nodes/edges props keep the same array reference, which a fresh
+  // .map() on every PatternsPanel render would defeat even when the
+  // underlying data hasn't changed (found by /simplify).
+  const { relationshipNodes, relationshipEdges } = useMemo(() => ({
+    relationshipNodes: (relationshipGraph?.nodes || []).map((node): GraphViewNode => ({
+      id: node.id,
+      label: node.summary,
+    })),
+    relationshipEdges: (relationshipGraph?.edges || []).map((edge): GraphViewEdge => ({
+      source: edge.source,
+      target: edge.target,
+      label: edge.reason,
+    })),
+  }), [relationshipGraph]);
 
-  const emotionalNodes: GraphViewNode[] = (emotionalGraph?.graph.nodes || []).map((node) => ({
-    id: node.id,
-    label: node.label,
-    kind: node.kind,
-  }));
-  const emotionalEdges: GraphViewEdge[] = (emotionalGraph?.graph.edges || []).map((edge) => ({
-    source: `trigger:${edge.trigger}`,
-    target: `emotion:${edge.emotion}`,
-    label: `${edge.mention_count} time${edge.mention_count === 1 ? "" : "s"}, avg intensity ${edge.average_intensity}`,
-    weight: edge.mention_count,
-  }));
+  const { emotionalNodes, emotionalEdges } = useMemo(() => ({
+    emotionalNodes: (emotionalGraph?.graph.nodes || []).map((node): GraphViewNode => ({
+      id: node.id,
+      label: node.label,
+      kind: node.kind,
+    })),
+    emotionalEdges: (emotionalGraph?.graph.edges || []).map((edge): GraphViewEdge => ({
+      source: `trigger:${edge.trigger}`,
+      target: `emotion:${edge.emotion}`,
+      label: `${edge.mention_count} time${edge.mention_count === 1 ? "" : "s"}, avg intensity ${edge.average_intensity}`,
+      weight: edge.mention_count,
+    })),
+  }), [emotionalGraph]);
 
   return (
     <div className="patterns-overlay" role="presentation" onClick={onClose}>

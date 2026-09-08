@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - keeps this importable for unit tests w
     genai_types = None  # type: ignore[assignment]
 
 from app.config import MEMORY_EMBEDDING_DIMENSIONS, MEMORY_EMBEDDING_MODEL, MEMORY_RECALL_LIMIT
+from app.embedded_interactions import load_embedded_interactions
 from app.models.embedding_client import EmbeddingClient
 from app.similarity import cosine_similarity
 
@@ -112,25 +113,14 @@ class FirestoreMemoryService(BaseMemoryService):  # type: ignore[misc]
     def _score_user_interactions(
         self, uid: str, query_vector: Sequence[float]
     ) -> Iterable[tuple[float, "MemoryEntry"]]:
-        docs = (
-            self._db.collection(f"users/{uid}/interactions")
-            .where("embeddingStatus", "==", "completed")
-            .stream()
-        )
-        for doc in docs:
-            data = doc.to_dict() or {}
-            vector = data.get("embedding")
-            summary = data.get("automaticSessionSummary")
-            if not vector or not summary:
-                continue
-            score = cosine_similarity(query_vector, vector)
-            epoch_ms = int((data.get("timestamps") or {}).get("epochMs") or 0)
+        for item in load_embedded_interactions(self._db, uid):
+            score = cosine_similarity(query_vector, item.embedding)
             timestamp_iso = (
-                datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat() if epoch_ms else None
+                datetime.fromtimestamp(item.epoch_ms / 1000, tz=timezone.utc).isoformat() if item.epoch_ms else None
             )
             entry = MemoryEntry(
-                content=genai_types.Content(role="user", parts=[genai_types.Part(text=summary)]),
-                id=doc.id,
+                content=genai_types.Content(role="user", parts=[genai_types.Part(text=item.summary)]),
+                id=item.interaction_id,
                 author="user",
                 timestamp=timestamp_iso,
                 custom_metadata={"score": score},

@@ -26,12 +26,13 @@ from typing import Any, Callable, Iterable
 
 import networkx as nx
 
+from app.config import MAX_GRAPH_NODES
+from app.embedded_interactions import load_embedded_interactions
 from app.similarity import cosine_similarity
 from app.tools.journal_tools import JournalToolError, require_uid
 
 SIMILARITY_EDGE_THRESHOLD = 0.75
 MIN_SHARED_KEYWORDS = 2
-MAX_GRAPH_NODES = 200
 DEFAULT_MAX_DEPTH = 2
 DEFAULT_MAX_RESULTS = 5
 
@@ -173,21 +174,10 @@ def build_graph_tool(*, db: Any, embedding_client: Any) -> Callable:
 
 
 def _load_user_nodes(db: Any, uid: str) -> Iterable[GraphNode]:
-    docs = (
-        db.collection(f"users/{uid}/interactions")
-        .where("embeddingStatus", "==", "completed")
-        .limit(MAX_GRAPH_NODES)
-        .stream()
-    )
-    for doc in docs:
-        data = doc.to_dict() or {}
-        summary = data.get("automaticSessionSummary")
-        embedding = data.get("embedding")
-        if not summary or not embedding:
-            continue
+    for item in load_embedded_interactions(db, uid, limit=MAX_GRAPH_NODES):
         yield GraphNode(
-            interaction_id=doc.id,
-            summary=summary,
-            keywords=_keywords(f"{summary} {data.get('userPrompt', '')}"),
-            embedding=list(embedding),
+            interaction_id=item.interaction_id,
+            summary=item.summary,
+            keywords=_keywords(f"{item.summary} {item.user_prompt}"),
+            embedding=item.embedding,
         )

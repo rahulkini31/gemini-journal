@@ -1,6 +1,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth, getAppCheckToken, signInWithGoogle, signOut } from "./lib/firebase";
+import { safeErrorMessage } from "./lib/http";
 import { ChatMessage, JournalInteraction, QuotaStatus } from "./types";
 import PatternsPanel from "./components/PatternsPanel";
 import {
@@ -27,13 +28,6 @@ type HistoryLoadOptions = { restoreLatest?: boolean };
 
 function newRequestId(): string {
   return crypto.randomUUID();
-}
-
-function safeErrorMessage(value: unknown, fallback: string): string {
-  if (value && typeof value === "object" && "error" in value && typeof value.error === "string") {
-    return value.error;
-  }
-  return fallback;
 }
 
 function formatTime(epochMs?: number): string {

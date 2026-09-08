@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from app.config import MONTHLY_ATTEMPT_LIMIT
+from app.config import MONTHLY_ATTEMPT_LIMIT, default_transactional, month_key
 from app.security.app_check import AppCheckError, AppCheckVerifier
 
 
@@ -47,10 +47,6 @@ class CapacityExhaustedError(Exception):
         self.code = code
 
 
-def _month_key(now) -> str:
-    return f"{now.year:04d}-{now.month:02d}"
-
-
 def reserve_model_attempt(
     *,
     db: Any,
@@ -62,20 +58,18 @@ def reserve_model_attempt(
     and the direct summary+sentiment call in app/main.py — the two model
     attempts a completed interaction now makes.
 
-    `transactional` defaults to the real `google.cloud.firestore.transactional`
-    decorator, same escape hatch as `persist_completed_interaction`
+    `transactional` defaults to `app.config.default_transactional()` (the
+    real `google.cloud.firestore.transactional` decorator), the same shared
+    escape hatch `persist_completed_interaction` uses
     (app/tools/journal_tools.py): that decorator drives real GAPIC
     begin/commit/retry machinery a lightweight fake transaction can't safely
     satisfy, so tests pass `transactional=lambda fn: fn` to run this exact
     logic directly against a fake instead.
     """
-    if transactional is None:
-        from google.cloud import firestore
-
-        transactional = firestore.transactional
+    transactional = transactional or default_transactional()
 
     current = now()
-    limit_ref = db.document(f"serviceLimits/monthly/months/{_month_key(current)}")
+    limit_ref = db.document(f"serviceLimits/monthly/months/{month_key(current)}")
 
     def _reserve(transaction):
         snapshot = limit_ref.get(transaction=transaction)
@@ -83,7 +77,7 @@ def reserve_model_attempt(
         if used >= MONTHLY_ATTEMPT_LIMIT:
             raise CapacityExhaustedError("ATTEMPT_CAPACITY", "The monthly demo model capacity is exhausted.")
         transaction.set(limit_ref, {
-            "month": _month_key(current),
+            "month": month_key(current),
             "monthlyAttemptCount": used + 1,
             "monthlyAttemptLimit": MONTHLY_ATTEMPT_LIMIT,
             "updatedAt": current,
