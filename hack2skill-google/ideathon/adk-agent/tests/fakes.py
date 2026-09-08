@@ -8,6 +8,31 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 
+class FakeAuthClient:
+    """A verify_id_token double supporting multiple users — one token maps
+    to one uid, via `register`. Matches the real IdTokenVerifier protocol
+    (app/security/firebase_auth.py): `verify_id_token(token, check_revoked)`."""
+
+    def __init__(self, project_id: str = "genai-academy-temp"):
+        self._project_id = project_id
+        self._tokens: dict[str, str] = {}
+
+    def register(self, token: str, uid: str) -> "FakeAuthClient":
+        self._tokens[token] = uid
+        return self
+
+    def verify_id_token(self, token: str, check_revoked: bool = True) -> dict:
+        uid = self._tokens.get(token)
+        if uid is None:
+            raise ValueError("invalid token")
+        return {
+            "uid": uid,
+            "aud": self._project_id,
+            "iss": f"https://securetoken.google.com/{self._project_id}",
+            "exp": int(datetime.now(timezone.utc).timestamp()) + 3600,
+        }
+
+
 class FakeSnapshot:
     def __init__(self, data: dict | None):
         self._data = data

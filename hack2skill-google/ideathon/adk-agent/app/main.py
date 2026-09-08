@@ -12,6 +12,14 @@ Route-to-route mapping against the baseline:
 - GET  /api/journal/quota        <- server.ts:391-409 (auth only, no App Check — matches the baseline)
 - GET  /api/journal/history      <- server.ts:411-418 (auth only)
 - GET  /api/config                <- server.ts:376-389 (public Firebase config only, no secrets)
+- GET  /api/graph/relationships        <- new: direct accessor for app/tools/graph_tools.py's full graph
+- GET  /api/graph/emotional-patterns   <- new: direct accessor for app/tools/sentiment_graph_tools.py's full graph
+
+The two /api/graph/* routes are the first genuinely cross-origin traffic
+this service answers — ../src/'s frontend calls them directly rather than
+through server.ts (a deliberate, narrow exception to this prototype's
+"never touch src/" boundary; server.ts itself is still untouched) — so this
+is also the first place CORSMiddleware is needed.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agent import AgentDependencies, build_chat_model, build_root_agent
@@ -35,6 +44,7 @@ from app.config import (
     SUMMARY_INPUT_TOKEN_CAP,
     SUMMARY_OUTPUT_TOKEN_CAP,
     SUMMARY_TITLE_MAX_BYTES,
+    cors_allowed_origins,
     is_test_bypass_enabled,
     project_id,
 )
@@ -45,7 +55,9 @@ from app.security.firebase_auth import AuthError, verify_authorization_header
 from app.sentiment.extraction import build_extraction_instruction, build_extraction_source, parse_extraction_response
 from app.sentiment.vocabulary import load_trigger_vocabulary
 from app.text_limits import token_upper_bound, truncate_to_token_cap
+from app.tools.graph_tools import get_full_relationship_graph
 from app.tools.journal_tools import JournalToolError, persist_completed_interaction, record_sentiment_analysis
+from app.tools.sentiment_graph_tools import get_full_emotional_pattern_graph
 
 _IDENTIFIER_RE = re.compile(IDENTIFIER_PATTERN)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,6 +110,13 @@ def create_app(*, db: Any, auth_client: Any, now=lambda: datetime.now(timezone.u
     _save_journal_interaction_tool, get_quota_status_tool = build_journal_tools(db=db, now=now)
 
     fastapi_app = FastAPI(title="Secure Journal ADK Agent (prototype)")
+    fastapi_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allowed_origins(),
+        allow_credentials=False,  # Bearer tokens in headers, not cookies — no credentialed CORS needed
+        allow_methods=["GET"],
+        allow_headers=["Authorization"],
+    )
 
     def _current_app_check_token(request: Request) -> Optional[str]:
         return request.headers.get("x-firebase-appcheck") or request.headers.get("x-firebase-app-check")
@@ -163,6 +182,22 @@ def create_app(*, db: Any, auth_client: Any, now=lambda: datetime.now(timezone.u
             return [_public_interaction(doc.id, doc.to_dict() or {}) for doc in docs]
         except Exception:  # noqa: BLE001
             return _safe_error(503, "Journal history is temporarily unavailable.")
+
+    @fastapi_app.get("/api/graph/relationships")
+    async def get_relationship_graph(authorization: Optional[str] = Header(default=None)):
+        user = _require_auth(authorization)
+        try:
+            return get_full_relationship_graph(db=db, uid=user.uid)
+        except Exception:  # noqa: BLE001
+            return _safe_error(503, "The relationship graph is temporarily unavailable.")
+
+    @fastapi_app.get("/api/graph/emotional-patterns")
+    async def get_emotional_pattern_graph(authorization: Optional[str] = Header(default=None)):
+        user = _require_auth(authorization)
+        try:
+            return get_full_emotional_pattern_graph(db=db, uid=user.uid)
+        except Exception:  # noqa: BLE001
+            return _safe_error(503, "The emotional pattern graph is temporarily unavailable.")
 
     @fastapi_app.post("/api/journal/interaction")
     async def post_interaction(request: Request, authorization: Optional[str] = Header(default=None)):

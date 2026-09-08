@@ -16,29 +16,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from tests.fakes import FakeFirestore
+from tests.fakes import FakeAuthClient, FakeFirestore
 
 UID = "user-a"
 VALID_TOKEN = "valid-token-for-user-a"
-
-
-class FakeAuthClient:
-    def verify_id_token(self, token: str, check_revoked: bool = True) -> dict:
-        if token != VALID_TOKEN:
-            raise ValueError("invalid token")
-        return {
-            "uid": UID,
-            "aud": "genai-academy-temp",
-            "iss": "https://securetoken.google.com/genai-academy-temp",
-            "exp": int(datetime.now(timezone.utc).timestamp()) + 3600,
-        }
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("GCLOUD_PROJECT", "genai-academy-temp")
     db = FakeFirestore()
-    app = create_app(db=db, auth_client=FakeAuthClient(), now=lambda: datetime.now(timezone.utc))
+    auth_client = FakeAuthClient().register(VALID_TOKEN, UID)
+    app = create_app(db=db, auth_client=auth_client, now=lambda: datetime.now(timezone.utc))
     return TestClient(app)
 
 

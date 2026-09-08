@@ -102,3 +102,18 @@ def project_id() -> str:
 def is_test_bypass_enabled() -> bool:
     """Mirrors server.ts's isTestBypassEnabled: closed by construction in prod."""
     return os.environ.get("NODE_ENV") != "production" and os.environ.get("TEST_BYPASS_AUTH") == "true"
+
+
+def cors_allowed_origins() -> list[str]:
+    """The frontend (../src/) now calls the two GET /api/graph/* routes
+    directly, cross-origin — a genuine new requirement, not present when
+    this service only had to answer same-origin agent traffic. Defaults to
+    "*" (every route here still requires a verified Firebase ID token, and
+    none of them use cookies, so an open CORS policy doesn't itself grant
+    access to anything); set CORS_ALLOWED_ORIGINS to a comma-separated list
+    to restrict it for a real deployment.
+    """
+    raw = os.environ.get("CORS_ALLOWED_ORIGINS", "*").strip()
+    if raw == "*":
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]

@@ -73,6 +73,30 @@ def _build_graph(nodes: list[GraphNode]) -> nx.Graph:
     return graph
 
 
+def get_full_relationship_graph(*, db: Any, uid: str) -> dict:
+    """Returns the whole relationship graph — every one of the user's own
+    embedded reflections as a node, every edge above the same similarity/
+    keyword thresholds `find_related_reflections` uses — with no query and
+    no BFS traversal. `find_related_reflections` is right for a chat tool
+    ("what's related to this one thing"); a visualization wants the whole
+    picture, not a conversational subset. Reuses `_load_user_nodes`/
+    `_build_graph` unchanged.
+
+    Unlike the tool's `related` results, summaries here are plain text, not
+    `<journal-data>`-wrapped — that wrapping exists to keep the text inert
+    when it re-enters a model prompt, which a direct HTTP response for a UI
+    never does.
+    """
+    nodes = list(_load_user_nodes(db, uid))
+    graph = _build_graph(nodes)
+    graph_nodes = [{"id": node.interaction_id, "summary": node.summary} for node in nodes]
+    graph_edges = [
+        {"source": source, "target": target, "reason": data["reason"]}
+        for source, target, data in graph.edges(data=True)
+    ]
+    return {"nodes": graph_nodes, "edges": graph_edges}
+
+
 def build_graph_tool(*, db: Any, embedding_client: Any) -> Callable:
     async def find_related_reflections(
         query: str,

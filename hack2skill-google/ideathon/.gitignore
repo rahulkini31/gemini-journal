@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+.features-gen/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/

@@ -88,6 +88,69 @@ def _build_pattern_graph(records: Iterable[tuple[list[dict], list[dict]]]) -> tu
     return graph, edge_stats
 
 
+def _compute_patterns(
+    *,
+    db: Any,
+    uid: str,
+    trigger_label: Optional[str],
+    min_mentions: int,
+    wrap_phrases: bool,
+) -> dict:
+    """Shared by the agent tool and the direct HTTP endpoint below.
+    `wrap_phrases` controls the `<journal-data>` untrusted-data wrapping:
+    on for the tool (its output can re-enter a model prompt), off for the
+    HTTP endpoint (a direct response for a UI, which should show plain
+    text, not literal wrapper tags).
+    """
+    min_mentions = max(1, min_mentions)
+    records = list(_load_sentiment_records(db, uid))
+    if not records:
+        return {"patterns": [], "graph": {"nodes": [], "edges": []}, "note": "No analyzed reflections yet."}
+
+    graph, edge_stats = _build_pattern_graph(records)
+
+    normalized_filter = _normalize(trigger_label) if trigger_label else None
+    patterns = []
+    graph_edges = []
+    for (trigger, emotion), stats in edge_stats.items():
+        if stats["count"] < min_mentions:
+            continue
+        average_intensity = round(stats["intensity_sum"] / stats["count"], 2)
+        graph_edges.append({
+            "trigger": trigger,
+            "emotion": emotion,
+            "mention_count": stats["count"],
+            "average_intensity": average_intensity,
+        })
+        if normalized_filter and _normalize(trigger) != normalized_filter:
+            continue
+        phrases = stats["phrases"]
+        patterns.append({
+            "trigger": trigger,
+            "emotion": emotion,
+            "mention_count": stats["count"],
+            "average_intensity": average_intensity,
+            "example_phrases": [f"<journal-data>{p}</journal-data>" for p in phrases] if wrap_phrases else list(phrases),
+        })
+
+    # Strongest, best-supported patterns first: most mentions, then highest
+    # average intensity.
+    patterns.sort(key=lambda pattern: (pattern["mention_count"], pattern["average_intensity"]), reverse=True)
+    graph_nodes = [{"id": f"{kind}:{label}", "kind": kind, "label": label} for kind, label in graph.nodes()]
+
+    return {
+        "patterns": patterns[:MAX_PATTERNS_RETURNED],
+        "graph": {"nodes": graph_nodes, "edges": graph_edges},
+    }
+
+
+def get_full_emotional_pattern_graph(*, db: Any, uid: str, min_mentions: int = MIN_MENTIONS_FOR_INSIGHT) -> dict:
+    """Direct, non-agent accessor for the whole pattern graph — see
+    `_compute_patterns`'s docstring for why this returns plain text where
+    the tool below returns `<journal-data>`-wrapped text."""
+    return _compute_patterns(db=db, uid=uid, trigger_label=None, min_mentions=min_mentions, wrap_phrases=False)
+
+
 def build_sentiment_graph_tool(*, db: Any) -> Callable:
     async def analyze_emotional_patterns(
         tool_context: Any,
@@ -107,52 +170,9 @@ def build_sentiment_graph_tool(*, db: Any) -> Callable:
                 reads as a settled pattern.
         """
         uid = require_uid(tool_context)
-        min_mentions = max(1, min_mentions)
-
-        records = list(_load_sentiment_records(db, uid))
-        if not records:
-            return {
-                "status": "success",
-                "patterns": [],
-                "graph": {"nodes": [], "edges": []},
-                "note": "No analyzed reflections yet.",
-            }
-
-        _graph, edge_stats = _build_pattern_graph(records)
-
-        normalized_filter = _normalize(trigger_label) if trigger_label else None
-        patterns = []
-        graph_edges = []
-        for (trigger, emotion), stats in edge_stats.items():
-            if stats["count"] < min_mentions:
-                continue
-            average_intensity = round(stats["intensity_sum"] / stats["count"], 2)
-            graph_edges.append({
-                "trigger": trigger,
-                "emotion": emotion,
-                "mention_count": stats["count"],
-                "average_intensity": average_intensity,
-            })
-            if normalized_filter and _normalize(trigger) != normalized_filter:
-                continue
-            patterns.append({
-                "trigger": trigger,
-                "emotion": emotion,
-                "mention_count": stats["count"],
-                "average_intensity": average_intensity,
-                "example_phrases": [f"<journal-data>{phrase}</journal-data>" for phrase in stats["phrases"]],
-            })
-
-        # Strongest, best-supported patterns first: most mentions, then
-        # highest average intensity.
-        patterns.sort(key=lambda pattern: (pattern["mention_count"], pattern["average_intensity"]), reverse=True)
-
-        graph_nodes = [{"id": f"{kind}:{label}", "kind": kind, "label": label} for kind, label in _graph.nodes()]
-
-        return {
-            "status": "success",
-            "patterns": patterns[:MAX_PATTERNS_RETURNED],
-            "graph": {"nodes": graph_nodes, "edges": graph_edges},
-        }
+        result = _compute_patterns(
+            db=db, uid=uid, trigger_label=trigger_label, min_mentions=min_mentions, wrap_phrases=True,
+        )
+        return {"status": "success", **result}
 
     return analyze_emotional_patterns

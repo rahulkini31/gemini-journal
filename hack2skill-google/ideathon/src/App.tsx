@@ -2,6 +2,7 @@ import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth, getAppCheckToken, signInWithGoogle, signOut } from "./lib/firebase";
 import { ChatMessage, JournalInteraction, QuotaStatus } from "./types";
+import PatternsPanel from "./components/PatternsPanel";
 import {
   AlertTriangle,
   BookOpen,
@@ -11,6 +12,7 @@ import {
   LoaderCircle,
   LogOut,
   MessageSquare,
+  Network,
   PenLine,
   Plus,
   Send,
@@ -64,6 +66,7 @@ export default function App() {
   const [retryAvailable, setRetryAvailable] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [patternsToken, setPatternsToken] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const signInRef = useRef<HTMLButtonElement>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
@@ -280,6 +283,16 @@ export default function App() {
     }
   };
 
+  const handleOpenPatterns = async () => {
+    if (!auth.currentUser) return;
+    try {
+      const token = await auth.currentUser.getIdToken();
+      setPatternsToken(token);
+    } catch {
+      setErrorMessage("Could not open your patterns view. Please try again.");
+    }
+  };
+
   const submitDisabled = isSubmitting || !currentPrompt.trim() || isPayloadTooLarge || isPromptTooLarge || capacityReached || modelAttemptCapacityReached || cooldownSeconds > 0;
   const submitHint = capacityReached
     ? "The server reports that the demo’s completed-reflection capacity is reached."
@@ -313,12 +326,16 @@ export default function App() {
         </div>
         {user ? <div className="account-actions">
           <span className="account-name">{user.displayName || user.email || "Signed-in journal"}</span>
+          <button type="button" className="icon-button" onClick={handleOpenPatterns} aria-label="View reflection patterns">
+            <Network size={18} aria-hidden="true" />
+          </button>
           <button type="button" className="icon-button" onClick={handleSignOut} aria-label="Sign out">
             <LogOut size={18} aria-hidden="true" />
           </button>
         </div> : <span className="sign-in-prompt">Google sign-in is required to save reflections.</span>}
       </div>
     </header>
+    {patternsToken && <PatternsPanel idToken={patternsToken} onClose={() => setPatternsToken(null)} />}
 
     {!user ? <main className="content-width sign-in-view">
       <section className="sign-in-card" aria-labelledby="sign-in-heading">
