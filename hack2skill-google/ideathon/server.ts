@@ -8,6 +8,24 @@ import { getAuth, DecodedIdToken } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { GoogleGenAI } from "@google/genai";
 
+// A global safety net for unhandled promise rejections. Reproduced locally
+// (with no Application Default Credentials available): the underlying
+// Google Cloud SDKs' lazy gRPC channel/credential setup can reject outside
+// any request's own await chain, which Express's per-route try/catch and
+// the final error-handling middleware below cannot intercept — Node treats
+// an unhandled rejection as fatal by default, so one such rejection crashed
+// this entire process, taking down every in-flight and future request, not
+// just the one route that triggered it. This converts that into a logged,
+// non-fatal event instead, matching this file's own threat-model
+// requirement that no single failure crash the whole service. Only the
+// error's own name/message is logged — never request content, tokens, or
+// secrets, consistent with every other log statement in this file (or
+// their absence).
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? `${reason.name}: ${reason.message}` : "non-Error rejection";
+  console.error(`Unhandled rejection (process kept alive): ${message}`);
+});
+
 type JsonObject = Record<string, unknown>;
 type InteractionStatus = "pending" | "completed" | "failed";
 type ModelAttemptKind = "chat" | "summary";

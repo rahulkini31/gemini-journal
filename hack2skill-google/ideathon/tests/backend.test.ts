@@ -140,4 +140,26 @@ describe("backend security boundary", () => {
     const quota = await request(service.app).get("/api/journal/quota").set("Authorization", secureHeaders.Authorization).expect(200);
     expect(quota.body).toMatchObject({ completedInteractionCount: 1, monthlyAttemptCount: 3 });
   });
+
+  it("keeps the process alive on an unhandled promise rejection instead of crashing it", async () => {
+    // Reproduced locally against a real environment with no Application
+    // Default Credentials: a Google Cloud SDK's lazy gRPC channel/credential
+    // setup rejected outside any request's own await chain, which no
+    // per-route try/catch or the final error-handling middleware can
+    // intercept — Node's default behavior is to crash the whole process on
+    // an unhandled rejection, taking down every in-flight and future
+    // request, not just the one route that triggered it. server.ts installs
+    // a process-level handler for exactly this; this test exercises that
+    // handler directly (reproducing the exact upstream SDK trigger isn't
+    // practical in a unit test) and confirms it logs safely rather than
+    // letting the rejection propagate.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const simulated = new Error("simulated background rejection, e.g. from a credential lookup");
+
+    Promise.reject(simulated);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("Unhandled rejection (process kept alive): Error: simulated background rejection"));
+    spy.mockRestore();
+  });
 });

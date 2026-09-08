@@ -84,7 +84,7 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px sol
 .graph-edge { stroke: #4a4a66; stroke-width: 1.4; }
 .graph-node circle { cursor: pointer; stroke: #10101f; stroke-width: 2; }
 .graph-node.selected circle { stroke: #fff; }
-.graph-node-label { fill: #cfcbe6; font-size: 9px; }
+.graph-node-label { fill: #cfcbe6; font-size: 9px; paint-order: stroke; stroke: #10101f; stroke-width: 3px; stroke-linejoin: round; }
 .patterns-list { margin-top: 1rem; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .5rem; }
 .patterns-list li { padding: .6rem .8rem; border-radius: 10px; background: #171827; border: 1px solid #2c2c42; font-size: .82rem; color: #e7e4f4; }
 

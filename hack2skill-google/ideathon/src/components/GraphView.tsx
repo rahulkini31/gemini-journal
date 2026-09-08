@@ -142,16 +142,37 @@ function computeLayout(nodes: GraphViewNode[], edges: GraphViewEdge[], height: n
     .force("charge", forceManyBody().strength(-120))
     .force("link", forceLink(simLinks).id((node: any) => node.id).distance(70))
     .force("center", forceCenter(WIDTH / 2, height / 2))
-    .force("collide", forceCollide(NODE_RADIUS + 8))
+    // Wider than the circle itself (NODE_RADIUS + 8 would suffice for the
+    // circles alone) to leave room for each node's label underneath it —
+    // found via manual UAT with a small, tightly-linked graph where labels
+    // otherwise overlapped illegibly; the CSS text halo (index.css's
+    // .graph-node-label) is the other half of this fix, for whatever
+    // overlap still occurs in denser graphs.
+    .force("collide", forceCollide(NODE_RADIUS + 22))
     .stop();
 
-  for (let tick = 0; tick < SIMULATION_TICKS; tick += 1) simulation.tick();
+  const minX = NODE_RADIUS + 20;
+  const maxX = WIDTH - NODE_RADIUS - 20;
+  const minY = NODE_RADIUS + 20;
+  const maxY = height - NODE_RADIUS - 20;
 
-  return simNodes.map((node) => ({
-    ...node,
-    x: clamp(node.x, NODE_RADIUS + 20, WIDTH - NODE_RADIUS - 20),
-    y: clamp(node.y, NODE_RADIUS + 20, height - NODE_RADIUS - 20),
-  }));
+  // Clamping only after the simulation finished (rather than each tick) let
+  // the collision/link forces push a node past the visible bounds during
+  // the simulation, then squash it back in one step at the very end —
+  // distorting its distance from neighbors it was otherwise correctly
+  // spaced from mid-simulation (found via manual UAT: an isolated 2-node
+  // pair near the edge rendered nearly on top of each other despite a
+  // 70px link distance). Clamping every tick instead keeps the forces
+  // interacting correctly against the actual boundary throughout.
+  for (let tick = 0; tick < SIMULATION_TICKS; tick += 1) {
+    simulation.tick();
+    for (const node of simNodes) {
+      node.x = clamp(node.x, minX, maxX);
+      node.y = clamp(node.y, minY, maxY);
+    }
+  }
+
+  return simNodes;
 }
 
 function clamp(value: number, min: number, max: number): number {

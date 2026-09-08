@@ -11,3 +11,13 @@ tests
 *.log
 .DS_Store
 challenge.md
+# Separate experimental Python service (see adk-agent/README.md) — not part
+# of this Dockerfile's build at all, but without this its .venv/ (~780 MB)
+# gets pulled into this image's build context by `COPY . .`, bloating and
+# slowing down the build of the actual deployed production service for no
+# reason. Found by inspection while verifying deployability, not by a real
+# build (Docker wasn't available to confirm empirically).
+adk-agent
+.features-gen
+playwright-report
+test-results
