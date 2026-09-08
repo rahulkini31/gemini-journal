@@ -1,0 +1,36 @@
+[project]
+name = "secure-journal-adk-agent"
+version = "0.1.0"
+description = "Experimental Google ADK (Python) rebuild of the Secure Personal Gemini Journal backend as an agent with tools and Firestore-backed memory. Not the hackathon submission — see README.md."
+requires-python = ">=3.11"
+dependencies = [
+  # [extensions] pulls in litellm, required for google.adk.models.lite_llm.LiteLlm
+  # (app/models/featherless_llm.py) — verified: importing it without this extra
+  # raises ImportError("LiteLLM support requires: pip install google-adk[extensions]").
+  "google-adk[extensions]>=1.0.0",
+  "google-genai>=1.0.0",
+  "firebase-admin>=6.5.0",
+  "google-cloud-firestore>=2.16.0",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "networkx>=3.3",
+  "pydantic>=2.7.0",
+  "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
