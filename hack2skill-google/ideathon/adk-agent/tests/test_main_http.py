@@ -31,6 +31,17 @@ def client(monkeypatch):
     return TestClient(app)
 
 
+@pytest.fixture
+def client_and_db(monkeypatch):
+    """Same wiring as `client`, but also hands back the underlying fake store
+    so a test can seed prior state (e.g. a recent interaction) directly."""
+    monkeypatch.setenv("GCLOUD_PROJECT", "genai-academy-temp")
+    db = FakeFirestore()
+    auth_client = FakeAuthClient().register(VALID_TOKEN, UID)
+    app = create_app(db=db, auth_client=auth_client, now=lambda: datetime.now(timezone.utc))
+    return TestClient(app), db
+
+
 def test_quota_requires_authentication(client):
     response = client.get("/api/journal/quota")
     assert response.status_code == 401
@@ -99,6 +110,31 @@ def test_interaction_rejects_an_unpermitted_field_once_authenticated(client, mon
     )
     assert response.status_code == 400
     assert response.json() == {"error": "Invalid journal interaction payload."}
+
+
+def test_interaction_rejects_within_cooldown_before_ever_touching_the_model(client_and_db, monkeypatch):
+    """Found live against the real Featherless-backed model: without
+    precheck_admission (app/tools/journal_tools.py), a cooldown-rejected
+    request still ran the full chat + summary/sentiment model calls before
+    persist_completed_interaction's own transactional check finally rejected
+    it — spending two real, paid model attempts on a request that was always
+    going to be refused. Seeds a just-now interaction directly in the fake
+    store and confirms the HTTP layer rejects with 429 RATE_LIMIT — no
+    FEATHERLESS_API_KEY is set, so if the model-building code path had run at
+    all this would instead fail with 503 (see the sibling test above), not
+    429; getting 429 here is the proof the model is never reached."""
+    monkeypatch.setenv("TEST_BYPASS_AUTH", "true")
+    monkeypatch.delenv("FEATHERLESS_API_KEY", raising=False)
+    client, db = client_and_db
+    db.store[f"users/{UID}"] = {"lastInteractionMs": int(datetime.now(timezone.utc).timestamp() * 1000)}
+
+    response = client.post(
+        "/api/journal/interaction",
+        json={"prompt": "hello there", "sessionId": "s" * 12, "idempotencyRequestId": "i" * 12},
+        headers={"Authorization": f"Bearer {VALID_TOKEN}", "X-Firebase-AppCheck": "test-app-check-token"},
+    )
+    assert response.status_code == 429
+    assert response.json() == {"error": "Please wait one minute before starting another journal interaction."}
 
 
 def test_interaction_with_a_valid_payload_fails_safely_without_a_configured_model_key(client, monkeypatch):

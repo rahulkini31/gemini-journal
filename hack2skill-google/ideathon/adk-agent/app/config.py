@@ -25,6 +25,20 @@ COMPLETED_INTERACTION_LIMIT = 10
 # unchanged rather than tightened, since resizing the quota model wasn't
 # part of what was asked.
 MONTHLY_ATTEMPT_LIMIT = 80
+# ADK's own per-invocation safety valve (RunConfig.max_llm_calls) defaults to
+# 500 if left unset — far above what a single chat turn should ever need.
+# Found live: an ungated substitute model used only for local testing (never
+# the production FEATHERLESS_MODEL) looped tool-calling for ~80 LLM calls in
+# one turn, silently consuming the ENTIRE MONTHLY_ATTEMPT_LIMIT above before
+# the reservation guardrail finally refused it — exactly the single-request
+# cost blowout the monthly cap exists to prevent, just triggered from inside
+# one HTTP request instead of across many. A turn is designed to spend one
+# chat model attempt plus, at most, a couple of tool-result round trips (see
+# MONTHLY_ATTEMPT_LIMIT's comment above: "one completed interaction now
+# spends exactly 2 model attempts" in the normal case) — 6 leaves headroom
+# for that while stopping a runaway loop orders of magnitude short of the
+# monthly budget.
+MAX_LLM_CALLS_PER_TURN = 6
 USER_COOLDOWN_SECONDS = 60
 PENDING_STALE_SECONDS = 2 * 60
 

@@ -42,6 +42,7 @@ from app.config import (
     FEATHERLESS_MODEL,
     HISTORY_INVOCATIONS_TO_KEEP,
     IDENTIFIER_PATTERN,
+    MAX_LLM_CALLS_PER_TURN,
     SUMMARY_INPUT_TOKEN_CAP,
     SUMMARY_OUTPUT_TOKEN_CAP,
     SUMMARY_TITLE_MAX_BYTES,
@@ -57,7 +58,13 @@ from app.sentiment.extraction import build_extraction_instruction, build_extract
 from app.sentiment.vocabulary import load_trigger_vocabulary
 from app.text_limits import first_text_part, token_upper_bound, truncate_to_token_cap
 from app.tools.graph_tools import get_full_relationship_graph
-from app.tools.journal_tools import JournalToolError, persist_completed_interaction, record_sentiment_analysis
+from app.tools.journal_tools import (
+    JournalToolError,
+    PersistedInteraction,
+    persist_completed_interaction,
+    precheck_admission,
+    record_sentiment_analysis,
+)
 from app.tools.sentiment_graph_tools import get_full_emotional_pattern_graph
 
 _IDENTIFIER_RE = re.compile(IDENTIFIER_PATTERN)
@@ -87,6 +94,35 @@ def _safe_error(status_code: int, message: str) -> JSONResponse:
 
 def _capacity_error_status(error: CapacityExhaustedError) -> int:
     return 429 if error.code == "ATTEMPT_CAPACITY" else 401
+
+
+# Shared by precheck_admission's early rejection and persist_completed_
+# interaction's own (authoritative) one — same JournalToolError codes, same
+# HTTP mapping, regardless of which of the two call sites raised it.
+_ADMISSION_ERROR_STATUS = {
+    "INVALID_INPUT": 400,
+    "IDEMPOTENCY_MISMATCH": 409,
+    "INTERACTION_PENDING": 409,
+    "RATE_LIMIT": 429,
+    "INTERACTION_CAPACITY": 429,
+}
+
+
+def _admission_error_status(error: JournalToolError) -> int:
+    return _ADMISSION_ERROR_STATUS.get(error.code, 503)
+
+
+def _completed_interaction_response(result: PersistedInteraction) -> dict:
+    return {
+        "id": result.interaction_id,
+        "userPrompt": result.user_prompt,
+        "assistantResponse": result.assistant_response,
+        "automaticSessionSummary": result.automatic_session_summary,
+        "sessionId": result.session_id,
+        "turnOrder": result.turn_order,
+        "status": result.status,
+        "idempotencyRequestId": result.interaction_id,
+    }
 
 
 def _default_firebase_app_exists() -> bool:
@@ -227,6 +263,21 @@ def create_app(*, db: Any, auth_client: Any, now=lambda: datetime.now(timezone.u
             return _safe_error(400, "Invalid journal interaction payload.")
         prompt, session_id, idempotency_request_id = submitted
 
+        # Cheap, non-transactional fail-fast BEFORE either paid model call —
+        # see precheck_admission's docstring for the real cost leak this
+        # closes (found live: a cooldown-rejected request was still running
+        # both model calls first). The transactional check inside
+        # persist_completed_interaction below remains authoritative.
+        try:
+            cached = precheck_admission(
+                db=db, now=now, uid=user.uid, prompt=prompt,
+                session_id=session_id, idempotency_request_id=idempotency_request_id,
+            )
+        except JournalToolError as error:
+            return _safe_error(_admission_error_status(error), error.message)
+        if cached is not None:
+            return _completed_interaction_response(cached)
+
         deps = AgentDependencies(
             db=db,
             embedding_client=embedding_client,
@@ -272,13 +323,7 @@ def create_app(*, db: Any, auth_client: Any, now=lambda: datetime.now(timezone.u
                 idempotency_request_id=idempotency_request_id,
             )
         except JournalToolError as error:
-            status = {
-                "IDEMPOTENCY_MISMATCH": 409,
-                "INTERACTION_PENDING": 409,
-                "RATE_LIMIT": 429,
-                "INTERACTION_CAPACITY": 429,
-            }.get(error.code, 503)
-            return _safe_error(status, error.message)
+            return _safe_error(_admission_error_status(error), error.message)
 
         memory_service.embed_completed_interaction(
             uid=user.uid, interaction_id=result.interaction_id, summary=result.automatic_session_summary or summary_text,
@@ -295,16 +340,7 @@ def create_app(*, db: Any, auth_client: Any, now=lambda: datetime.now(timezone.u
             status=extraction.sentiment_status,
         )
 
-        return {
-            "id": result.interaction_id,
-            "userPrompt": result.user_prompt,
-            "assistantResponse": result.assistant_response,
-            "automaticSessionSummary": result.automatic_session_summary,
-            "sessionId": result.session_id,
-            "turnOrder": result.turn_order,
-            "status": result.status,
-            "idempotencyRequestId": result.interaction_id,
-        }
+        return _completed_interaction_response(result)
 
     @fastapi_app.exception_handler(HTTPException)
     async def http_error(_request: Request, exc: HTTPException):
@@ -359,6 +395,7 @@ def _fake_tool_context(uid: str) -> _FakeToolContext:
 
 
 async def _run_agent_turn(agent: Any, *, uid: str, session_id: str, prompt: str) -> str:
+    from google.adk.agents.run_config import RunConfig
     from google.adk.plugins.context_filter_plugin import ContextFilterPlugin
     from google.adk.runners import InMemoryRunner
     from google.genai import types
@@ -379,7 +416,14 @@ async def _run_agent_turn(agent: Any, *, uid: str, session_id: str, prompt: str)
 
     content = types.Content(role="user", parts=[types.Part(text=f"<journal-data>{prompt}</journal-data>")])
     final_text = ""
-    async for event in runner.run_async(user_id=uid, session_id=session_id, new_message=content):
+    # Caps LLM calls within this single turn (see MAX_LLM_CALLS_PER_TURN's
+    # comment in app/config.py) — found live: without this, ADK's own default
+    # of 500 let one runaway tool-calling loop silently spend the entire
+    # monthly attempt budget in a single HTTP request.
+    run_config = RunConfig(max_llm_calls=MAX_LLM_CALLS_PER_TURN)
+    async for event in runner.run_async(
+        user_id=uid, session_id=session_id, new_message=content, run_config=run_config
+    ):
         if event.is_final_response() and event.content and event.content.parts:
             final_text = event.content.parts[0].text or final_text
     if not final_text:

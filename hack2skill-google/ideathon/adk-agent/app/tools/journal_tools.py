@@ -75,6 +75,93 @@ class PersistedInteraction:
     turn_order: int
 
 
+def precheck_admission(
+    *,
+    db: Any,
+    now: Callable[[], datetime],
+    uid: str,
+    prompt: str,
+    session_id: str,
+    idempotency_request_id: str,
+) -> Optional[PersistedInteraction]:
+    """Cheap, non-transactional admission check run BEFORE the two paid model
+    calls a fresh turn makes (see app/main.py) — not a replacement for
+    persist_completed_interaction's own transactional check below, which
+    remains the sole source of truth under concurrency, but a fast-fail for
+    the common cases so a request that will be rejected anyway does not
+    first spend real model attempts finding that out.
+
+    Found live, against the real Featherless-backed model: submitting a
+    second journal entry inside the 60s cooldown window still ran the full
+    chat + summary/sentiment model calls (monthlyAttemptCount went from 2 to
+    4) before persist_completed_interaction's transaction finally rejected it
+    with RATE_LIMIT — a real, avoidable cost leak the automated test suite's
+    fakes never surface, since none of them charge anything for a "wasted"
+    model call. The same reordering also means a client retrying an
+    already-completed idempotency_request_id (a normal thing for an
+    at-least-once caller to do) no longer re-runs the model at all — it hits
+    the early return below instead.
+
+    Mirrors the same rules `_admit_and_write` applies, in the same order,
+    against a plain (non-transactional) read — a real race between this
+    check and another admission is still caught by that transaction, exactly
+    as it always was; this only short-circuits the common, non-racing case.
+
+    Returns the already-completed PersistedInteraction if this exact
+    idempotency_request_id was already admitted (callers should return that
+    cached result and skip the model entirely), or None if the request looks
+    admissible right now. Raises JournalToolError for every case
+    persist_completed_interaction would also reject deterministically.
+    """
+    prompt = prompt.strip()
+    if not prompt:
+        raise JournalToolError("INVALID_INPUT", "Journal entry cannot be empty.")
+    if not _IDENTIFIER_RE.match(session_id) or not _IDENTIFIER_RE.match(idempotency_request_id):
+        raise JournalToolError("INVALID_INPUT", "Invalid session or request identifier.")
+    if token_upper_bound(prompt) > CHAT_INPUT_TOKEN_CAP:
+        raise JournalToolError("INVALID_INPUT", "Journal entry exceeds the model input limit.")
+
+    current = now()
+    interaction_snap = db.document(f"users/{uid}/interactions/{idempotency_request_id}").get()
+    existing = interaction_snap.to_dict() if interaction_snap.exists else None
+
+    if existing and (existing.get("userPrompt") != prompt or existing.get("sessionId") != session_id):
+        raise JournalToolError("IDEMPOTENCY_MISMATCH", "This idempotency request ID belongs to different journal content.")
+    if existing and existing.get("status") == "completed":
+        return PersistedInteraction(
+            interaction_id=idempotency_request_id,
+            duplicate=True,
+            status="completed",
+            user_prompt=existing.get("userPrompt", prompt),
+            assistant_response=existing.get("assistantResponse"),
+            automatic_session_summary=existing.get("automaticSessionSummary"),
+            session_id=existing.get("sessionId", session_id),
+            turn_order=int(existing.get("turnOrder", 1)),
+        )
+    if existing and existing.get("status") == "pending":
+        updated_at = existing.get("updatedAt")
+        age_seconds = (current - updated_at).total_seconds() if updated_at else PENDING_STALE_SECONDS + 1
+        if age_seconds < PENDING_STALE_SECONDS:
+            raise JournalToolError("INTERACTION_PENDING", "This journal request is already being processed.")
+        # Stale pending: fall through and let the model run, same as
+        # _admit_and_write's own stale-pending handling.
+
+    limit_data = db.document(f"serviceLimits/monthly/months/{month_key(current)}").get().to_dict() or {}
+    completed_count = int(limit_data.get("completedInteractionCount", 0))
+    in_flight_count = int(limit_data.get("inFlightInteractionCount", 0))
+    if (completed_count + in_flight_count) >= COMPLETED_INTERACTION_LIMIT:
+        raise JournalToolError("INTERACTION_CAPACITY", "The monthly demo interaction capacity is exhausted.")
+
+    if existing is None:
+        user_data = db.document(f"users/{uid}").get().to_dict() or {}
+        last_interaction_ms = int(user_data.get("lastInteractionMs", 0))
+        elapsed_ms = current.timestamp() * 1000 - last_interaction_ms
+        if elapsed_ms < USER_COOLDOWN_SECONDS * 1000:
+            raise JournalToolError("RATE_LIMIT", "Please wait one minute before starting another journal interaction.")
+
+    return None
+
+
 def persist_completed_interaction(
     *,
     db: Any,

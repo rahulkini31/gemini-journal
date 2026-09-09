@@ -134,16 +134,48 @@ def _matches(data: dict, field: str, op: str, value: Any) -> bool:
 
 
 class FakeTransaction:
-    """Duck-typed stand-in for google.cloud.firestore.Transaction: only
-    `.get(ref)` (used via `ref.get(transaction=...)`) and `.set(ref, data,
-    merge=...)` are exercised by app/tools/journal_tools.py's
-    _admit_and_write, so that is all this implements."""
+    """Duck-typed stand-in for google.cloud.firestore.Transaction.
+
+    `.get(ref)`/`.set(ref, data, merge=...)` are what app/tools/
+    journal_tools.py's _admit_and_write and app/callbacks/guardrails.py's
+    reserve_model_attempt actually read/write through. The `_clean_up`/
+    `_begin`/`_id`/`_commit`/`_read_only`/`_max_attempts` surface below
+    exists purely so the REAL `google.cloud.firestore.transactional`
+    decorator's retry/begin/commit driver (verified against the installed
+    package) can run against this fake directly — no real GAPIC/network
+    calls, just enough of the shape it inspects — so callers like
+    app/main.py's route handlers can be exercised through their real,
+    unmodified code path in live testing instead of needing every call site
+    to also accept an injectable `transactional=lambda fn: fn` override.
+    """
+
+    _read_only = False
+    _max_attempts = 1
 
     def __init__(self, store: dict):
         self._store = store
+        self._id = None
+
+    def get(self, ref: FakeDocRef):
+        return ref.get(transaction=self)
 
     def set(self, ref: FakeDocRef, data: dict, merge: bool = False):
         ref.set(data, merge=merge)
+
+    def update(self, ref: FakeDocRef, data: dict):
+        ref.update(data)
+
+    def _clean_up(self) -> None:
+        pass
+
+    def _begin(self, retry_id=None) -> None:
+        pass
+
+    def _commit(self):
+        return []
+
+    def _rollback(self) -> None:
+        pass
 
 
 class FakeFirestore:

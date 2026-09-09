@@ -16,6 +16,7 @@ from app.tools.journal_tools import (
     JournalToolError,
     build_journal_tools,
     persist_completed_interaction,
+    precheck_admission,
 )
 from tests.fakes import FakeFirestore, FakeToolContext
 
@@ -116,6 +117,82 @@ def test_quota_01_completed_interaction_capacity_is_enforced_at_the_service_leve
     with pytest.raises(JournalToolError) as excinfo:
         _save(db, now, request_id="request-overflow0001")
     assert excinfo.value.code == "INTERACTION_CAPACITY"
+
+
+def _precheck(db, now, *, session_id=SESSION, request_id=REQUEST_1, prompt="hello there"):
+    return precheck_admission(
+        db=db, now=now, uid=UID, prompt=prompt, session_id=session_id, idempotency_request_id=request_id,
+    )
+
+
+def test_precheck_admits_a_fresh_request_without_touching_the_model():
+    db = FakeFirestore()
+    now = lambda: datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert _precheck(db, now) is None
+
+
+def test_precheck_rejects_a_second_fresh_request_within_the_cooldown_before_any_model_call():
+    """Found live against the real Featherless-backed model: without this
+    precheck, a cooldown-rejected request still ran both paid model calls
+    first (monthlyAttemptCount went from 2 to 4) before
+    persist_completed_interaction's own transactional check finally rejected
+    it. precheck_admission exists to fail this case before either model call
+    is made — this test locks that ordering in."""
+    db = FakeFirestore()
+    clock = {"t": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+    now = lambda: clock["t"]
+
+    _save(db, now, request_id=REQUEST_1)
+    clock["t"] += timedelta(seconds=USER_COOLDOWN_SECONDS - 1)
+    with pytest.raises(JournalToolError) as excinfo:
+        _precheck(db, now, request_id=REQUEST_2)
+    assert excinfo.value.code == "RATE_LIMIT"
+
+
+def test_precheck_returns_the_cached_result_for_an_already_completed_idempotency_key():
+    """A retried idempotency_request_id (normal for an at-least-once caller)
+    should short-circuit to the cached response, not re-run the model."""
+    db = FakeFirestore()
+    now = lambda: datetime(2026, 9, 1, tzinfo=timezone.utc)
+    saved = _save(db, now)
+
+    cached = _precheck(db, now)
+    assert cached is not None
+    assert cached.duplicate is True
+    assert cached.interaction_id == saved.interaction_id
+    assert cached.assistant_response == saved.assistant_response
+
+
+def test_precheck_rejects_mismatched_content_under_the_same_request_id():
+    db = FakeFirestore()
+    now = lambda: datetime(2026, 9, 1, tzinfo=timezone.utc)
+    _save(db, now, prompt="first content")
+    with pytest.raises(JournalToolError) as excinfo:
+        _precheck(db, now, prompt="different content entirely")
+    assert excinfo.value.code == "IDEMPOTENCY_MISMATCH"
+
+
+def test_precheck_rejects_at_the_monthly_interaction_capacity():
+    db = FakeFirestore()
+    clock = {"t": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+    now = lambda: clock["t"]
+
+    for index in range(COMPLETED_INTERACTION_LIMIT):
+        clock["t"] += timedelta(seconds=USER_COOLDOWN_SECONDS + 1)
+        _save(db, now, request_id=f"request-{index:012d}")
+
+    clock["t"] += timedelta(seconds=USER_COOLDOWN_SECONDS + 1)
+    with pytest.raises(JournalToolError) as excinfo:
+        _precheck(db, now, request_id="request-overflow0001")
+    assert excinfo.value.code == "INTERACTION_CAPACITY"
+
+
+def test_precheck_rejects_an_empty_prompt():
+    db = FakeFirestore()
+    now = lambda: datetime(2026, 9, 1, tzinfo=timezone.utc)
+    with pytest.raises(JournalToolError) as excinfo:
+        _precheck(db, now, prompt="   ")
+    assert excinfo.value.code == "INVALID_INPUT"
 
 
 def test_get_quota_status_requires_a_verified_uid_from_session_state():
